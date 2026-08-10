@@ -69,8 +69,8 @@ template (v21.3) at `chat-templates/qwen36.jinja`, wired in via
 `VLLM_CHAT_TEMPLATE`. It fixes render errors, KV-cache invalidation, and
 agentic-loop stalls in the stock Qwen template, and adds `think_on`/`think_off`
 tokens, tool-error detection, and per-tool arg truncation. Passed
-`--default-chat-template-kwargs '{"preserve_thinking": false}'` (`VLLM_CHAT_KWARGS`)
-drops past turns' reasoning from the prompt.
+`--default-chat-template-kwargs '{"preserve_thinking": true}'` (`VLLM_CHAT_KWARGS`)
+keeps past turns' reasoning in the prompt; set it to `false` to drop it.
 
 ### Non-standard vLLM flags
 
