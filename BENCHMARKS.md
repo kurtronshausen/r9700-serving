@@ -16,7 +16,7 @@ overflows the R9700's 64 KiB LDS at `TILE_SIZE=64` with bf16 K/V tiles. The fix
 caps `TILE_SIZE` to 32 and `num_stages` to 1. Applied via
 [`patches/aiter/unified-attention-bf16-kv.patch`](patches/aiter/).
 
-## Current (2026-08-10, vLLM 0.27.0rc2, MTP4, bf16 KV, tuned MoE, NCCL 4-ch)
+## Current (2026-08-10, vLLM 0.27.0, MTP4, bf16 KV, tuned MoE, NCCL 4-ch)
 
 Single-run data; averages across 3 benchmark sets are in the comparison table.
 
@@ -31,7 +31,7 @@ Single-run data; averages across 3 benchmark sets are in the comparison table.
 
 ### v0.26 → v0.27 upgrade
 
-| model          | metric  | v0.26.2.dev0 | v0.27.0rc2 | delta |
+| model          | metric  | v0.26.2.dev0 | v0.27.0 | delta |
 |:---------------|:--------|-------------:|-----------:|------:|
 | 27B            | pp2048  |      ~2927   |    ~2916   | flat  |
 | 27B            | tg32    |        ~75   |      ~87   | **+16%** |
