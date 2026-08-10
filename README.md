@@ -29,6 +29,8 @@ Run `just --list` to see all recipes including `rebuild` (force-rebuild) and
 HuggingFace model cache).
 
 The vLLM OpenAI-compatible API is available at `http://localhost:8180/v1`.
+Other containers on the same compose network can reach it via the `llm-backend`
+network alias instead of the host port.
 
 ## Configuration
 
@@ -59,6 +61,68 @@ Runtime environment is split across files:
   (not active: AITER's FP8 MoE backend does not yet support `gfx1201`)
 - `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP, tool use)
 - `env/qwen3.6-27b.env` — dense 27B model config
+
+### Chat template
+
+The official Qwen3.6 template is replaced with the community "froggeric" fixed
+template (v21.3) at `chat-templates/qwen36.jinja`, wired in via
+`VLLM_CHAT_TEMPLATE`. It fixes render errors, KV-cache invalidation, and
+agentic-loop stalls in the stock Qwen template, and adds `think_on`/`think_off`
+tokens, tool-error detection, and per-tool arg truncation. Passed
+`--default-chat-template-kwargs '{"preserve_thinking": false}'` (`VLLM_CHAT_KWARGS`)
+drops past turns' reasoning from the prompt.
+
+### Non-standard vLLM flags
+
+- **`--enable-auto-tool-choice --tool-call-parser qwen3_coder
+  --reasoning-parser qwen3`** (`VLLM_TOOL_CHOICE`, 35B profile): OpenAI
+  tool-calling with Qwen's `qwen3_coder` parser.
+- **`--limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'`**: multimodal
+  images allowed, audio/video disabled.
+- **`--override-generation-config`**: server-side sampling defaults
+  (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
+- **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
+- **`--max-model-len 131072`**, **`--max-num-seqs 4`**, **`-tp 2`**,
+  **`--gpu-memory-utilization 0.9`**.
+- **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — bf16 for these models.
+- **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
+  (MTP4, see above).
+
+### Runtime env knobs
+
+Non-standard environment set in `compose.yaml` and `Dockerfile.fullbuild`:
+
+| var | value | why |
+|:----|:------|:----|
+| `GPU_MAX_HW_QUEUES` | `1` | avoids RDNA4 decode regression (see tuning) |
+| `NCCL_P2P_DISABLE` | `1` | two GPUs on separate PCIe root ports |
+| `NCCL_MIN/MAX_NCHANNELS` | `4` | bandwidth sweet spot (see tuning) |
+| `HSA_ENABLE_IPC_MODE_LEGACY` | `1` | needed for the ROCm stack |
+| `HSA_NO_SCRATCH_RECLAIM` | `1` | avoid scratch reallocation stalls |
+| `HIP_FORCE_DEV_KERNARG` | `1` | force device-side kernel args |
+| `LD_PRELOAD` | `libamd_smi.so` | expose GPU metrics via amd_smi |
+| `TORCH_BLAS_PREFER_HIPBLASLT` | `1` | prefer hipBLASLt GEMMs |
+| `SAFETENSORS_FAST_GPU` | `1` | fast safetensors load on GPU |
+| `PYTORCH_NVML_BASED_CUDA_CHECK` | `1` | NVML-based CUDA check on ROCm |
+| `FLASH_ATTENTION_TRITON_AMD_ENABLE` | `TRUE` | enable Triton FA on AMD |
+| `TOKENIZERS_PARALLELISM` | `false` | avoid HF tokenizer thread churn |
+| `VLLM_TUNED_CONFIG_FOLDER` | `/app/fused_moe_configs` | deploy tuned MoE tile configs |
+| `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` | `0,1` | select the two R9700s |
+| `HIP_ARCHITECTURES`/`AMDGPU_TARGETS`/etc. | `gfx1201` | target the R9700 ISA |
+
+The `VLLM_ROCM_USE_AITER_*` flags in `env/aiter-unified-attention.env` enable
+only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
+(AITER's MoE/FP8 backends don't support `gfx1201` yet).
+
+### Tuning tools
+
+- `tools/tune_fused_moe.py` — sweeps Triton tile configs for the stock vLLM
+  `fused_experts` kernel and writes the per-token-count optimum to
+  `fused_moe_configs/`. Flags: `--M 1,2,...`, `--E`, `--N`, `--K`, `--topk`,
+  `--reps`, `--out`, `--no-sweep`. The checked-in JSONs cover E=256/N=256 and
+  E=256/N=512 at `block_shape=[128,128]`, `fp8_w8a8`.
+- `tools/tune_w8a8_fp8.py` — sweeps dense W8A8 block-scaled MM tile configs.
+  Experimental; see the dead end below (defaults are already optimal).
 
 Key tuning decisions:
 - **MTP4 speculative decoding**: 4 draft tokens per step (~72% acceptance on
@@ -102,3 +166,19 @@ Measured on 2× R9700, MTP4, bf16 KV, single request, vLLM 0.27.0rc2.
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
+
+### Long-context concurrency
+
+Decode cost is dominated by attending over the cached KV, so concurrent
+deep-context requests degrade sharply. Measured on 35B-A3B (tg32, MTP4):
+
+| depth | c1 | c2 | c4 |
+|------:|---:|---:|---:|
+| d1024 | 196 | 133 | 169 |
+| d64000| 181 | 41 | 44 |
+
+c2 ≈ c4 aggregate decode (geomean 86.1 vs 86.0 t/s) but e2e TTFT @ d64000 is
+~15× better (1.6 s vs 23.5 s) — the 64k prefill no longer serializes against a
+second deep prefill within the 4096-token batch budget. For >32k-token agent
+sessions, cap concurrency at 1-2. A/Bs of fp8 KV, MTP2, and an 8192-token batch
+budget all lost to the tuned baseline; the cost is inherent to the stack.
