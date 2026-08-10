@@ -5,8 +5,11 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 
 ## Setup
 
-`--max-num-batched-tokens 4096`, `--max-num-seqs 4`, `--gpu-memory-utilization
+`--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
 0.9`, `-tp 2`, MTP4, `--kv-cache-dtype auto` (bf16), `GPU_MAX_HW_QUEUES=1`.
+Single-request numbers are invariant to `--max-num-seqs`; the server runs at
+`--max-num-seqs 1` because concurrency loses to serial on this stack (see
+Concurrency).
 
 bf16 KV cache requires patching AITER: the Triton unified-attention kernel
 overflows the R9700's 64 KiB LDS at `TILE_SIZE=64` with bf16 K/V tiles. The fix
@@ -115,6 +118,29 @@ c1 at depth. A/Bs (fp8 KV, MTP2, 8192 batch) all lost to the baseline — the
 deep-context decode cost is inherent to attending over a huge cached KV, not
 fixable by those knobs. See
 [`08_10_qwen3.6-35b-a3b_mtp4_depth_c2.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_depth_c2.md).
+
+### c1 vs c2 head-to-head (2026-08-10)
+
+A same-boot A/B (`--max-num-seqs 1` vs 2, identical depth sweep, see
+[`08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md))
+settles it: **serial (c1) is strictly more efficient**. The earlier c2 sweep
+was not a bad-process-state artifact — it reproduces closely (c2 total geomean
+95 vs 86 before). Concurrency never reaches single-request decode:
+
+| depth | c1 | c2 total | c2/req | c2 total / c1 |
+|:------|---:|---------:|-------:|:--------------|
+| d1024 | 180.0 |    127.2 |  113.1 | 71% |
+| d16384| 156.1 |     97.4 |  104.1 | 62% |
+| d32000| 175.7 |     76.7 |   97.4 | 44% |
+| d64000| 171.2 |     46.9 |   77.0 | 27% |
+| geomean | 169.5 |   94.8 |  100.4 | - |
+
+Two concurrent requests (c2 total) move *fewer* tokens/s than one request alone
+at every depth, so two deep requests finish faster back-to-back, and c2's
+latency is worse (incremental TTFT @ d64000 1070 vs 1562 ms; full-context load
+9292 vs 14178 ms). The server runs at `--max-num-seqs 1`. Use c2 only when
+multiple users must progress simultaneously at ~45-55% lower per-request
+decode.
 
 ## Depth sweep (35B-A3B, MTP4)
 

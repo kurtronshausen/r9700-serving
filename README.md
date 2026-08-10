@@ -82,7 +82,7 @@ drops past turns' reasoning from the prompt.
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
-- **`--max-model-len 131072`**, **`--max-num-seqs 4`**, **`-tp 2`**,
+- **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
   **`--gpu-memory-utilization 0.9`**.
 - **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — bf16 for these models.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
@@ -150,6 +150,11 @@ Key tuning decisions:
   per-expert N=256/512 allows 24 viable shapes vs 4 for dense.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
+- **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
+  the 35B-A3B (tg32 160-175 vs ~181-191, tg128 135-137 vs ~146) with flat
+  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2, and the
+  tuned `fused_moe_configs` (TP layout) no longer apply. Skip at this scale;
+  revisit only for much larger active-parameter MoEs.
 
 ## Performance
 
@@ -170,15 +175,23 @@ Full methodology, depth sweeps, and tuning history in
 ### Long-context concurrency
 
 Decode cost is dominated by attending over the cached KV, so concurrent
-deep-context requests degrade sharply. Measured on 35B-A3B (tg32, MTP4):
+deep-context requests degrade sharply. Measured on 35B-A3B (tg32, MTP4);
+`c2 total` = aggregate across 2 concurrent requests, `c2/req` = per request.
 
-| depth | c1 | c2 | c4 |
-|------:|---:|---:|---:|
-| d1024 | 196 | 133 | 169 |
-| d64000| 181 | 41 | 44 |
+| depth | c1 | c2 total | c2/req |
+|------:|---:|---------:|-------:|
+| d1024 | 180 |      127 |    113 |
+| d16384| 156 |       97 |    104 |
+| d32000| 176 |       77 |     97 |
+| d64000| 171 |       47 |     77 |
 
-c2 ≈ c4 aggregate decode (geomean 86.1 vs 86.0 t/s) but e2e TTFT @ d64000 is
-~15× better (1.6 s vs 23.5 s) — the 64k prefill no longer serializes against a
-second deep prefill within the 4096-token batch budget. For >32k-token agent
-sessions, cap concurrency at 1-2. A/Bs of fp8 KV, MTP2, and an 8192-token batch
+The server runs at **c1 (`--max-num-seqs 1`)**, which a head-to-head confirms
+is the most efficient long-context setup: two concurrent requests (c2 total,
+geomean ~95 t/s) never reach one request's decode (c1, geomean ~170 t/s) at any
+depth, so even two deep requests finish faster served back-to-back, and c2's
+latency is worse too (incremental TTFT @ d64000 1070 vs 1562 ms; full-context
+load 9292 vs 14178 ms). c2 ≈ c4 aggregate (geomean 86-95) — neither reaches c1.
+Use concurrency only when multiple users must progress simultaneously and you
+can accept ~45-55% lower per-request decode; for raw throughput or a single
+active session, serial wins. A/Bs of fp8 KV, MTP2, and an 8192-token batch
 budget all lost to the tuned baseline; the cost is inherent to the stack.
