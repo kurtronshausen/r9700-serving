@@ -85,7 +85,8 @@ Two R9700s on separate PCIe 5.0 x8 root ports, P2P disabled
 
 ## Concurrency
 
-35B-A3B, MTP3. `total` = aggregate across all concurrent requests, `req` = per
+35B-A3B. The table below is the original MTP3-era data; current MTP4 findings
+follow. `total` = aggregate across all concurrent requests, `req` = per
 request.
 
 | test                | c1 (t/s) | c4 total (t/s) | c4 req (t/s) | scaling |
@@ -99,27 +100,55 @@ Longer generations scale best at concurrency 4 (2.32× for tg512). Longer prompt
 cut scaling (prefill competes with decode for the `max_num_batched_tokens`
 budget).
 
-## Depth sweep (35B-A3B, MTP3)
+The same limit hits long *contexts* even with short generations: a c4 depth
+sweep (tg32) keeps full-context prefill scaling well (~11-12k t/s aggregate at
+d1024-d8192) but decode aggregate collapses from 347 t/s @ d1024 to 3.6 t/s @
+d64000 — the 64k-token contexts can no longer share a batch within the 4096
+token budget, and e2e TTFT reaches ~23.9 s. See
+[`08_10_qwen3.6-35b-a3b_mtp4_depth_c4.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_depth_c4.md).
+
+A c2 depth sweep finds the sweet spot for long-context serving: aggregate decode
+matches c4 (geomean 86.1 vs 86.0 t/s) but e2e TTFT @ d64000 is ~15× better
+(1.6 s vs 23.5 s), since the 64k prefill no longer serializes against a second
+deep prefill in the batch budget. Per-request throughput is still 23-68% below
+c1 at depth. A/Bs (fp8 KV, MTP2, 8192 batch) all lost to the baseline — the
+deep-context decode cost is inherent to attending over a huge cached KV, not
+fixable by those knobs. See
+[`08_10_qwen3.6-35b-a3b_mtp4_depth_c2.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_depth_c2.md).
+
+## Depth sweep (35B-A3B, MTP4)
 
 Single-request speeds at increasing prompt depth (d = prefix tokens before the
-2048-token prompt).
+2048-token prompt), current stack. `pp2048` = **incremental** prefill of only the
+2048 fresh tokens (depth prefix cached via `--enable-prefix-caching`); each new
+token attends over the full cached KV, so this falls with depth. Full-context
+rows (`ctx_pp`, e2e TTFT) are the comparable-to-old metric. Full table in
+[`08_10_qwen3.6-35b-a3b_mtp4_depth.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_depth.md).
+
+> Note: the old MTP3 sweep's `pp2048 @ dXXX` column measured full-context
+> prefill (depth + 2048, uncached). Compare against the new `ctx_pp` rows, not
+> `pp2048`: old 10043 @ d4096 → ctx_pp 11247, old 6774 @ d64000 → ctx_pp 6878,
+> e2e TTFT @ d64000 9750 → 9308 ms. No regression.
 
 | test            |               t/s |       ttfr (ms) |
 |:----------------|------------------:|----------------:|
-| pp2048 @ d0     | 9354.47 ± 171.64 |   220.16 ± 3.97 |
-| tg32 @ d0       |    143.80 ± 6.85 |                 |
-| pp2048 @ d1024  | 10109.29 ± 156.51 |   305.97 ± 4.66 |
-| tg32 @ d1024    |    165.34 ± 7.46 |                 |
-| pp2048 @ d4096  | 10043.61 ± 24.73 |   613.59 ± 1.55 |
-| tg32 @ d4096    |    171.18 ± 15.47 |                 |
-| pp2048 @ d8192  |  9614.95 ± 5.76 |  1066.97 ± 0.61 |
-| tg32 @ d8192    |    145.08 ± 6.21 |                 |
-| pp2048 @ d16384 |  8983.63 ± 14.97 |  2053.60 ± 3.40 |
-| tg32 @ d16384   |    154.68 ± 6.95 |                 |
-| pp2048 @ d32000 |  8167.36 ± 6.58 |  4170.78 ± 3.33 |
-| tg32 @ d32000   |    147.70 ± 6.55 |                 |
-| pp2048 @ d64000 |  6774.85 ± 1.69 |  9750.82 ± 2.38 |
-| tg32 @ d64000   |    139.17 ± 7.54 |                 |
+| pp2048 @ d0     | 8386.44 ± 3406.48 |   318.82 ± 181.06 |
+| tg32 @ d0       |    187.97 ± 11.48 |                 |
+| pp2048 @ d1024  |  6998.75 ± 111.74 |    293.66 ± 4.62 |
+| tg32 @ d1024    |     196.10 ± 0.22 |                 |
+| pp2048 @ d4096  |   5397.80 ± 11.07 |    380.37 ± 0.78 |
+| tg32 @ d4096    |    175.41 ± 17.97 |                 |
+| pp2048 @ d8192  |   5080.98 ± 8.20  |    404.03 ± 0.65 |
+| tg32 @ d8192    |    174.81 ± 18.35 |                 |
+| pp2048 @ d16384 |   4402.15 ± 4.97  |    466.19 ± 0.53 |
+| tg32 @ d16384   |     175.45 ± 0.81 |                 |
+| pp2048 @ d32000 |   3105.65 ± 8.75  |    660.41 ± 1.86 |
+| tg32 @ d32000   |     149.69 ± 8.02 |                 |
+| pp2048 @ d64000 |   1907.59 ± 20.29 |   1074.68 ± 11.37 |
+| tg32 @ d64000   |     180.88 ± 23.24 |                 |
 
-Decode holds flat ~139-171 t/s across all depths. TTFT scales linearly with
-context length.
+Decode stays flat ~150-196 t/s across all depths. Incremental prefill drops
+with depth (attention span over the cached prefix grows): ~7000 t/s at d1024 →
+~1900 t/s at d64000. TTFT of the incremental prompt grows sub-linearly with
+depth thanks to prefix caching (294 → 1075 ms); full-context e2e TTFT scales
+linearly (258 ms @ d1024 → 9308 ms @ d64000).
