@@ -63,7 +63,7 @@ services:
       --chat-template ${VLLM_CHAT_TEMPLATE}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       ${VLLM_TOOL_CHOICE}
-      --default-chat-template-kwargs "${VLLM_CHAT_KWARGS:-}"
+      --default-chat-template-kwargs '${VLLM_CHAT_KWARGS:-}'
       --max-model-len 128000
       --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching

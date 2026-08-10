@@ -41,7 +41,11 @@ rebuild:
     @MODEL_PROFILE={{model}} {{runtime}} compose build --no-cache
 
 up:
-    @MODEL_PROFILE={{model}} {{runtime}} compose up -d
+    #!/usr/bin/env bash
+    set -a
+    source "env/{{model}}.env"
+    MODEL_PROFILE={{model}}
+    {{runtime}} compose up -d
 
 logs:
     @{{runtime}} compose logs -f
