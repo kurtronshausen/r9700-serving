@@ -51,7 +51,6 @@ services:
     env_file:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
-      - env/${MODEL_PROFILE}.env
     environment:
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
@@ -64,7 +63,7 @@ services:
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       ${VLLM_TOOL_CHOICE}
       --default-chat-template-kwargs '${VLLM_CHAT_KWARGS:-}'
-      --max-model-len 128000
+      --max-model-len 131072
       --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
