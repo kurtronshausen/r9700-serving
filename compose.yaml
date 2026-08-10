@@ -71,7 +71,7 @@ services:
       --host 0.0.0.0
       --port 8180
       --dtype auto
-      --max-num-seqs 4
+      --max-num-seqs 1
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-fp8}
       -tp 2
       --attention-backend ROCM_AITER_UNIFIED_ATTN
