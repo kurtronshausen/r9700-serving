@@ -6,13 +6,26 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 ## Setup
 
 `--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
-0.8`, `-tp 2`, MTP4, `--kv-cache-dtype fp8`, `GPU_MAX_HW_QUEUES=1`.
-Single-request numbers are invariant to `--max-num-seqs`; the server runs at
-`--max-num-seqs 1` because concurrency loses to serial on this stack (see
-Concurrency). The froggeric v21.3 chat template (`chat-templates/qwen36.jinja`)
-is wired via `--chat-template` (reasoning → `reasoning`, answer → `content`).
+0.8`, `-tp 2`, `GPU_MAX_HW_QUEUES=1`. Single-request numbers are invariant to
+`--max-num-seqs`; the server runs at `--max-num-seqs 1` because concurrency
+loses to serial on this stack (see Concurrency). The froggeric v21.3 chat
+template (`chat-templates/qwen36.jinja`) is wired via `--chat-template`
+(reasoning → `reasoning`, answer → `content`).
 
-## Current (2026-08-11, vLLM 0.27.0, torch 2.13, triton 3.8.0, fp8 KV)
+## Current (2026-08-11, vLLM 0.27.0, torch 2.13, triton 3.8.0, bf16 KV + tuned MoE, MTP off on 35B)
+
+**BF16 KV** restored via AITER LDS-fit patch + **tuned fused MOE configs**
+(`fused_moe_configs/E=256,N=512,json`) for Triton 3.8.0. MTP disabled on 35B-A3B
+per vLLM #47087 workaround; 27B retains MTP4.
+
+| model | test | t/s |
+|:------|-----:|----:|
+| 35B-A3B | pp2048 | ~10260 |
+| 35B-A3B | tg32 | 86.8 |
+| 35B-A3B | tg128 | 86.7 |
+| 27B | pp2048 | ~2924 |
+| 27B | tg32 | ~87.4 |
+| 27B | tg128 | ~76.3 |
 
 Stock MoE autotuning (no tuned `fused_moe_configs`). Tuned MoE configs gave
 mixed results on 3.8.0 (wins at 0-32K, regression at 64-128K context) — see
@@ -171,3 +184,26 @@ grows): ~6847 t/s at d1024 → ~1379 t/s at d128K. Decode is mostly flat
 114-195 t/s, with the expected shallow-context bump from full-budget cudagraphs.
 Full-e2e TTFT scales linearly with total context loaded (cache-friendly 6.3K
 t/s ctx_pp up to ~6K depth, degrading at 128K to 6.3K with 20.3s TTFT).
+
+## Depth sweep (35B-A3B, bf16 KV, tuned MOE, MTP off, 2026-08-11)
+
+Same stack as current but with **BF16 KV** + **tuned fused MOE configs**, MTP
+disabled per vLLM #47087. `pp` = incremental prefill of 2048 fresh tokens
+(depth prefix cached).
+
+| depth | tg32 (t/s) | tg128 (t/s) |
+|------:|-----------:|------------:|
+| 0     | 86.8 | — |
+| 4096  | 86.8 | 86.7 |
+| 8192  | 86.5 | 86.1 |
+| 16384 | 85.4 | 84.7 |
+| 32768 | 81.7 | 81.6 |
+| 65536 | 78.2 | 77.3 |
+| 128000| 71.4 | 70.7 |
+
+**Key finding:** tg32/tg128 are nearly identical (~88→86 t/s at d4K, ~78 t/s
+at d64K, ~71 t/s at d128K). The tg128 bump over tg32 at 0-depth (~189 t/s
+MTP4 baseline) erodes once MTP is removed — without draft tokens, decode speed
+is capped by the MoE kernel throughput regardless of output length. KV cache
+loading dominates prefill at depth, and decode falls with depth as the attention
+over the cached prefix grows (71 t/s at d128K vs 87 at d0 = −18%).
