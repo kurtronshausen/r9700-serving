@@ -87,9 +87,10 @@ final answer into `content`.
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
   **`--gpu-memory-utilization 0.8`**.
-- **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`). bf16 KV required an AITER
-  LDS-fit patch under triton 3.7.1 (torch 2.12) that produced garbage output under
-  triton 3.8.0 (torch 2.13), so fp8 is the safe choice.
+- **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`). The AITER BF16 LDS-fit
+  patch (`patches/aiter/unified-attention-bf16-kv.patch`) caps `TILE_SIZE` and
+  `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by MTP token
+  loops (see "MTP bug" below), not the patch — BF16 is now the default.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on 27B only; disabled on 35B, see "MTP workaround").
 
@@ -123,47 +124,55 @@ only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 
 Key tuning decisions:
 - **MTP4 speculative decoding** (27B only): 4 draft tokens per step (~72% acceptance
-  on 27B), roughly doubles decode throughput vs no MTP. MTP is **disabled on 35B-A3B**
-  — see "MTP workaround" below.
+  on 27B), roughly doubles decode throughput vs no MTP. MTP is **disabled on
+  35B-A3B** — see "MTP bug" below.
 - **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
   throughput regression on RDNA4 — one queue per process avoids kernel launch
   scheduling overhead.
 - **NCCL channels pinned to 4** (`NCCL_MIN_NCHANNELS=NCCL_MAX_NCHANNELS=4`):
   the bandwidth sweet spot for two GPUs on separate PCIe 5.0 x8 root ports with
   P2P disabled.
-- **fp8 KV cache**: the default. bf16 KV was tested and showed zero perf
-  regression, but the AITER patch needed to fit the 64 KiB LDS limit produced
-  garbage output under triton 3.8.0 (torch 2.13), so fp8 KV is the safe choice.
+- **BF16 KV cache**: restored via an AITER LDS-fit patch. Prior "garbage" output
+  was caused by MTP token loops, not the patch. BF16 at ~88 t/s outperforms fp8.
+- **Tuned fused MOE configs** (`fused_moe_configs/E=256,N=512,...json`): re-tuned
+  for Triton 3.8.0 via `tools/tune_fused_moe.py`. Per-token-count optimal tile
+  configs improve shallow-context throughput (ctx_tg +16% at d32K, tg32 +13% at
+  d16K) with safe defaults for deep context. Sourced from vLLM stock `fused_moe`
+  kernel, enabled via `VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs`.
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
 
-### MTP workaround (35B only)
+### MTP bug (35B only)
 
-vLLM's native MTP speculative decoding has a known bug with Qwen3-MoE models
-(`Qwen3.6-35B-A3B`, `Qwen3.6-27B-A3B`) where deep agentic conversations can
-degenerate into garbled token loops producing no usable output
-([vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087)).
-The bug causes output quality collapse — not just slight degradation — and can
-be triggered mid-conversation even after many clean turns.
+vLLM's native MTP speculative decoding has a confirmed bug with Qwen3-MoE models
+(`Qwen3.6-35B-A3B`, `Qwen3.6-27B-A3B`) where deep agentic conversations degenerate
+into garbled token loops with no usable output. This affects multiple upstream issues:
 
-**Impact on 35B-A3B**: throughput drops from ~185 tg32 (with MTP4) to
-~83 tg32 (no MTP). The 27B (dense) model is unaffected and MTP works correctly.
+| Issue | Summary |
+|:------|:--------|
+| [vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087) | MTP token loops on Qwen3-MoE; output quality collapse mid-conversation |
+| [vllm-project/vllm#35288](https://github.com/vllm-project/vllm/issues/35288) | Native MTP speculative decoding instability on MoE architectures |
+| [vllm-project/vllm#50989](https://github.com/vllm-project/vllm/issues/50989) | Strict JSON mode loops on Qwen3 models |
+| [vllm-project/vllm#51008](https://github.com/vllm-project/vllm/issues/51008) | GDN hypothesis bugs causing token degeneration |
+| [vllm-project/vllm#51679](https://github.com/vllm-project/vllm/issues/51679) | Qwen3 tool parser edge cases |
+| [vllm-project/vllm#51858](https://github.com/vllm-project/vllm/issues/51858) | Additional Qwen3.6 parsing & MTP interaction bugs |
 
-**Workaround**: `compose.yaml` and `env/qwen3.6-35b-a3b.env` have been patched
-to disable MTP for the 35B model only. The 27B model profile still uses MTP4.
-This resolves to a simple variable override — the 35B profile sets
-`VLLM_SPEC_DECODE=` (empty), which skips the `--speculative-config` flag.
-The 27B profile inherits the shared `VLLM_SPEC_DECODE` from `qwen3.6.env.common`.
+**Impact**: 35B-A3B throughput drops from ~185 tg32 (MTP4) to ~83 tg32 (no MTP).
+The 27B (dense) model is unaffected and MTP works correctly.
+
+**Workaround**: `compose.yaml` and `env/qwen3.6-35b-a3b.env` disable MTP for
+the 35B model only. The 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
+`--speculative-config`. The 27B profile inherits `VLLM_SPEC_DECODE` from
+`qwen3.6.env.common` and retains MTP4.
 
 ## Dead ends
 
-- **Tuned MoE kernel configs**: per-token-count optimal Triton tile configs for
-  the stock vLLM `fused_experts` kernel. Re-tuned for triton 3.8.0 and A/B tested
-  vs stock defaults (depth 0–128K). Gains at 0–32K depth (ctx_tg +16% at d32K,
-  tg32 +13% at d16K) but **losses at deep context** (ctx_tg −14% at d64K,
-  −13% at d128K; tg32 −9% at d128K). The sweep picks configs that favor
-  shallow-batch MoE at the expense of deep-context codegen — not safe to deploy
-  for long-context serving. Dropped; MoE uses stock autotuned defaults.
+- **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
+  upstream AITER adds RDNA4 support.
+- **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
+  the 35B-A3B (tg32 160-175 vs ~181-191, tg128 135-137 vs ~146) with flat
+  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2. Skip at
+  this scale; revisit only for much larger active-parameter MoEs.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
 - **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
@@ -173,9 +182,9 @@ The 27B profile inherits the shared `VLLM_SPEC_DECODE` from `qwen3.6.env.common`
 
 ## Performance
 
-Measured on 2× R9700, fp8 KV, single request, vLLM 0.27.0, torch 2.13,
-triton 3.8.0. No tuned MoE configs — stock triton autotuned defaults.
-MTP4 is enabled for the 27B model; disabled for 35B-A3B (see "MTP workaround").
+Measured on 2× R9700, BF16 KV + tuned MOE config, single request, vLLM 0.27.0,
+torch 2.13, triton 3.8.0+git (ROCm 7.14.0). MTP4 is enabled for the 27B model;
+disabled for 35B-A3B (see "MTP bug" above).
 
 | model                     | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|-----------:|---------:|----------:|
@@ -184,8 +193,8 @@ MTP4 is enabled for the 27B model; disabled for 35B-A3B (see "MTP workaround").
 | Qwen3.6-27B-FP8 (v0.27)     |    ~2916 |     ~87 |    ~76   |
 | Qwen3.6-35B-A3B-FP8 (v0.26)    | ~10864 |    ~182 |   ~144   |
 | Qwen3.6-35B-A3B-FP8 (v0.27)    | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-FP8 (MTP disabled) | ~10075 |     ~83 |    —     |
-| Qwen3.6-27B-FP8 (current)      |  ~2924 |     ~87 |     ~76   |
+| Qwen3.6-35B-A3B-BF16+MTPOff |     —      |    ~88  |      —     |
+| Qwen3.6-27B-BF16+MTP4     |    ~2924 |     ~87 |     ~76   |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
@@ -194,8 +203,7 @@ Full methodology, depth sweeps, and tuning history in
 
 Decode cost is dominated by attending over the cached KV, so concurrent
 deep-context requests degrade sharply. The table below was measured on 35B-A3B
-(tg32, MTP4). The current production config has MTP disabled for 35B per the
-workaround above — actual throughput at every depth is ~2x lower.
+(BF16 KV + tuned MOE, tg32, MTP disabled).
 `c2 total` = aggregate across 2 concurrent requests, `c2/req` = per request.
 
 | depth | c1 | c2 total | c2/req |
