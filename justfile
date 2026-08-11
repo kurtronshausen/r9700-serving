@@ -30,8 +30,13 @@ clear-vllm-caches:
 
     printf 'Removing vLLM host cache directories:\n'
     for dir in "${cache_dirs[@]}"; do
-        printf '  %s\n' "$dir"
-        rm -rf -- "$dir"
+        if [ ! -w "$dir" ]; then
+            printf '  %s (not writable, using sudo)\n' "$dir"
+            sudo rm -rf -- "$dir"
+        else
+            printf '  %s\n' "$dir"
+            rm -rf -- "$dir"
+        fi
     done
 
 build:
