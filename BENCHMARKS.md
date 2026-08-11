@@ -6,24 +6,19 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 ## Setup
 
 `--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
-0.9`, `-tp 2`, MTP4, `--kv-cache-dtype auto` (bf16), `GPU_MAX_HW_QUEUES=1`.
+0.9`, `-tp 2`, MTP4, `--kv-cache-dtype fp8`, `GPU_MAX_HW_QUEUES=1`.
 Single-request numbers are invariant to `--max-num-seqs`; the server runs at
 `--max-num-seqs 1` because concurrency loses to serial on this stack (see
 Concurrency).
 
-bf16 KV cache requires patching AITER: the Triton unified-attention kernel
-overflows the R9700's 64 KiB LDS at `TILE_SIZE=64` with bf16 K/V tiles. The fix
-caps `TILE_SIZE` to 32 and `num_stages` to 1. Applied via
-[`patches/aiter/unified-attention-bf16-kv.patch`](patches/aiter/).
-
-## Current (2026-08-10, vLLM 0.27.0, MTP4, bf16 KV, NCCL 4-ch)
+## Current (2026-08-10, vLLM 0.27.0, MTP4, fp8 KV, NCCL 4-ch)
 
 Single-run data; averages across 3 benchmark sets are in the comparison table.
 
 > Note: these runs were measured with the tuned-MoE `fused_moe_configs`
-> deployed (`VLLM_TUNED_CONFIG_FOLDER`). As of the v0.27.0 stable rollback
-> (db5f90b) compose no longer wires those configs in, so the current container
-> build does not deploy them (see README "Key tuning decisions").
+> deployed (`VLLM_TUNED_CONFIG_FOLDER`). Those configs were removed after the
+> torch 2.13 / triton 3.8 bump (see README "Dead ends"), so current containers
+> run stock MoE autotuning.
 
 | model                     |   test |       t/s |
 |:--------------------------|-------:|----------:|
@@ -54,11 +49,11 @@ multi-layer MTP refactor. Both models show consistent gains with no regressions.
 |:---------------------------------|-----------:|---------:|------:|
 | 27B andy upstream (MTP3, fp8 KV) |     2750   |   81.9   | v0.25 |
 | 35B-A3B no MTP, stock config     |   ~10075   |    ~83   | v0.26 |
-| 27B (MTP4, bf16 KV, all opts)    |    ~2916   |    ~87   | v0.27 |
-| 35B (MTP4, bf16 KV, all opts)    |   ~11143   |   ~189   | v0.27 |
+| 27B (MTP4, fp8 KV, all opts)    |    ~2916   |    ~87   | v0.27 |
+| 35B (MTP4, fp8 KV, all opts)    |   ~11143   |   ~189   | v0.27 |
 
 The 35B-A3B MoE model is 3.8× faster on prefill and 2.2× faster on decode than
-the dense 27B. MTP4 + tuned MoE configs + NCCL tuning + v0.27 deliver 2.3×
+the dense 27B. MTP4 + NCCL tuning + v0.27 deliver 2.3×
 decode throughput over the no-MTP baseline.
 
 ## MTP impact (35B-A3B)

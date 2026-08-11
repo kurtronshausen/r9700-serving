@@ -50,14 +50,22 @@ services:
     env_file:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
+      - ./env/${MODEL_PROFILE}.env
     environment:
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8180/v1/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
     command: >
       ${VLLM_MODEL}
       --tokenizer ${VLLM_TOKENIZER}
       --served-model-name ${VLLM_SERVED_NAME}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
+      --chat-template /app/chat-templates/qwen36.jinja
       ${VLLM_TOOL_CHOICE}
       --max-model-len 131072
       --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}

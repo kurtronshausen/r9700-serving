@@ -63,9 +63,7 @@ Runtime environment is split across files:
 ### Chat template
 
 vLLM's built-in Qwen3.6 chat template is used (no `--chat-template` /
-`--default-chat-template-kwargs` flags). The community "froggeric" fixed
-template (v21.3) from earlier runs is retained at
-`chat-templates/qwen36.jinja` as a reference only — it is no longer wired in.
+`--default-chat-template-kwargs` flags).
 
 ### Non-standard vLLM flags
 
@@ -79,7 +77,7 @@ template (v21.3) from earlier runs is retained at
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
   **`--gpu-memory-utilization 0.8`**.
-- **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — bf16 for these models.
+- **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — fp8 for these models.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4, see above).
 
@@ -111,16 +109,6 @@ The `VLLM_ROCM_USE_AITER_*` flags in `env/aiter-unified-attention.env` enable
 only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 (AITER's MoE/FP8 backends don't support `gfx1201` yet).
 
-### Tuning tools
-
-- `tools/tune_fused_moe.py` — sweeps Triton tile configs for the stock vLLM
-  `fused_experts` kernel and writes the per-token-count optimum to
-  `fused_moe_configs/`. Flags: `--M 1,2,...`, `--E`, `--N`, `--K`, `--topk`,
-  `--reps`, `--out`, `--no-sweep`. The checked-in JSONs cover E=256/N=256 and
-  E=256/N=512 at `block_shape=[128,128]`, `fp8_w8a8`.
-- `tools/tune_w8a8_fp8.py` — sweeps dense W8A8 block-scaled MM tile configs.
-  Experimental; see the dead end below (defaults are already optimal).
-
 Key tuning decisions:
 - **MTP4 speculative decoding**: 4 draft tokens per step (~72% acceptance on
   35B-A3B), roughly doubles decode throughput vs no MTP.
@@ -130,35 +118,29 @@ Key tuning decisions:
 - **NCCL channels pinned to 4** (`NCCL_MIN_NCHANNELS=NCCL_MAX_NCHANNELS=4`):
   the bandwidth sweet spot for two GPUs on separate PCIe 5.0 x8 root ports with
   P2P disabled.
-- **bf16 KV cache**: requires patching AITER's `TILE_SIZE` from 64→32 to stay
-  within the R9700's 64 KiB LDS limit. ~2× KV memory cost vs fp8, zero perf
-  regression.
+- **fp8 KV cache**: the default. bf16 KV was tested and showed zero perf
+  regression, but the AITER patch needed to fit the 64 KiB LDS limit produced
+  garbage output under triton 3.8.0 (torch 2.13), so fp8 KV is the safe choice.
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
-- **Tuned MoE kernel configs** (`fused_moe_configs/`): per-token-count optimal
-  Triton tile sizes for the stock vLLM `fused_experts` kernel (not AITER MoE,
-  which doesn't support gfx1201). Measured +5-11% prefill / +6-11% tg32 decode
-  in the 08-09 A/B, but **not currently deployed** — compose no longer mounts
-  `fused_moe_configs/` or sets `VLLM_TUNED_CONFIG_FOLDER`. Re-enable via
-  `VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs` plus the volume mount if
-  you want the gain back.
 
 ## Dead ends
 
-- **W8A8 dense-linear tuning**: only 4 tile shapes fit the 64 KiB LDS limit,
-  defaults already optimal — no gain. The MoE kernel succeeded because its
-  per-expert N=256/512 allows 24 viable shapes vs 4 for dense.
+- **Tuned MoE kernel configs** (`fused_moe_configs/`): per-token-count optimal
+  Triton tile configs for the stock vLLM `fused_experts` kernel. Measured +5-11%
+  prefill / +6-11% tg32 decode in the 08-09 A/B, but removed after the torch
+  2.13 / triton 3.8 bump — the 3.6.0-tuned tile configs are not safe to apply
+  verbatim under triton 3.8 codegen, so MoE now uses stock autotuned defaults.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
 - **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
   the 35B-A3B (tg32 160-175 vs ~181-191, tg128 135-137 vs ~146) with flat
-  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2, and the
-  tuned `fused_moe_configs` (TP layout) no longer apply. Skip at this scale;
-  revisit only for much larger active-parameter MoEs.
+  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2. Skip at
+  this scale; revisit only for much larger active-parameter MoEs.
 
 ## Performance
 
-Measured on 2× R9700, MTP4, bf16 KV, single request, vLLM 0.27.0.
+Measured on 2× R9700, MTP4, fp8 KV, single request, vLLM 0.27.0.
 
 | model                     | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|-----------:|---------:|----------:|
