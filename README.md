@@ -55,22 +55,17 @@ Model selection is controlled by `MODEL_PROFILE` in `.env` — override inline
 with `MODEL_PROFILE=qwen3.6-27b just up`.
 
 Runtime environment is split across files:
-- `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA)
+- `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
 - `env/aiter-unified-attention.env` — enables AITER unified attention only
-- `env/aiter-moe-unified-attention.env` — also enables AITER MoE/FP8 kernels
-  (not active: AITER's FP8 MoE backend does not yet support `gfx1201`)
 - `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP, tool use)
 - `env/qwen3.6-27b.env` — dense 27B model config
 
 ### Chat template
 
-The official Qwen3.6 template is replaced with the community "froggeric" fixed
-template (v21.3) at `chat-templates/qwen36.jinja`, wired in via
-`VLLM_CHAT_TEMPLATE`. It fixes render errors, KV-cache invalidation, and
-agentic-loop stalls in the stock Qwen template, and adds `think_on`/`think_off`
-tokens, tool-error detection, and per-tool arg truncation. Passed
-`--default-chat-template-kwargs '{"preserve_thinking": true}'` (`VLLM_CHAT_KWARGS`)
-keeps past turns' reasoning in the prompt; set it to `false` to drop it.
+vLLM's built-in Qwen3.6 chat template is used (no `--chat-template` /
+`--default-chat-template-kwargs` flags). The community "froggeric" fixed
+template (v21.3) from earlier runs is retained at
+`chat-templates/qwen36.jinja` as a reference only — it is no longer wired in.
 
 ### Non-standard vLLM flags
 
@@ -83,14 +78,15 @@ keeps past turns' reasoning in the prompt; set it to `false` to drop it.
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
-  **`--gpu-memory-utilization 0.9`**.
+  **`--gpu-memory-utilization 0.8`**.
 - **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — bf16 for these models.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4, see above).
 
 ### Runtime env knobs
 
-Non-standard environment set in `compose.yaml` and `Dockerfile.fullbuild`:
+Non-standard environment set across `compose.yaml`, `Dockerfile.fullbuild`,
+and `env/2xr9700.vllm.common` (loaded via `env_file`):
 
 | var | value | why |
 |:----|:------|:----|
@@ -106,7 +102,8 @@ Non-standard environment set in `compose.yaml` and `Dockerfile.fullbuild`:
 | `PYTORCH_NVML_BASED_CUDA_CHECK` | `1` | NVML-based CUDA check on ROCm |
 | `FLASH_ATTENTION_TRITON_AMD_ENABLE` | `TRUE` | enable Triton FA on AMD |
 | `TOKENIZERS_PARALLELISM` | `false` | avoid HF tokenizer thread churn |
-| `VLLM_TUNED_CONFIG_FOLDER` | `/app/fused_moe_configs` | deploy tuned MoE tile configs |
+| `TORCHINDUCTOR_CACHE_DIR` | `/root/.cache/torchinductor` | persist compile cache (host-mounted) |
+| `TRITON_CACHE_DIR` | `/root/.cache/triton` | persist Triton compile cache (host-mounted) |
 | `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` | `0,1` | select the two R9700s |
 | `HIP_ARCHITECTURES`/`AMDGPU_TARGETS`/etc. | `gfx1201` | target the R9700 ISA |
 
@@ -140,8 +137,11 @@ Key tuning decisions:
   gated-delta layers force an attention block size of 2112 tokens).
 - **Tuned MoE kernel configs** (`fused_moe_configs/`): per-token-count optimal
   Triton tile sizes for the stock vLLM `fused_experts` kernel (not AITER MoE,
-  which doesn't support gfx1201). Deployed via
-  `VLLM_TUNED_CONFIG_FOLDER`. Provides +5-11% throughput.
+  which doesn't support gfx1201). Measured +5-11% prefill / +6-11% tg32 decode
+  in the 08-09 A/B, but **not currently deployed** — compose no longer mounts
+  `fused_moe_configs/` or sets `VLLM_TUNED_CONFIG_FOLDER`. Re-enable via
+  `VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs` plus the volume mount if
+  you want the gain back.
 
 ## Dead ends
 
