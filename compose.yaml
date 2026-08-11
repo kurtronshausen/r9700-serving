@@ -58,7 +58,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 120s
+      start_period: 600s
     command: >
       ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}

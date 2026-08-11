@@ -159,7 +159,7 @@ triton 3.8.0. No tuned MoE configs — stock triton autotuned defaults.
 
 | model                     | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|-----------:|---------:|----------:|
-| Qwen3.6-27B (andy baseline) |     2750 |    81.9 |    —     |
+| Qwen3.6-27B (Andy & upstream baseline) |     2750 |    81.9 |    —     |
 | Qwen3.6-35B-A3B (no MTP)   |   ~10075 |     ~83 |    —     |
 | Qwen3.6-27B-FP8 (v0.26)     |    ~2927 |     ~75 |    ~66   |
 | Qwen3.6-27B-FP8 (v0.27)     |    ~2916 |     ~87 |    ~76   |
