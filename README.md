@@ -64,7 +64,7 @@ with `MODEL_PROFILE=qwen3.6-27b just up`.
 Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
 - `env/aiter-unified-attention.env` — enables AITER unified attention only
-- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP, tool use)
+- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP disabled, tool use)
 - `env/qwen3.6-27b.env` — dense 27B model config
 
 ### Chat template
@@ -91,7 +91,7 @@ final answer into `content`.
   LDS-fit patch under triton 3.7.1 (torch 2.12) that produced garbage output under
   triton 3.8.0 (torch 2.13), so fp8 is the safe choice.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4, see above).
+  (MTP4 on 27B only; disabled on 35B, see "MTP workaround").
 
 ### Runtime env knobs
 
@@ -122,8 +122,9 @@ only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 (AITER's MoE/FP8 backends don't support `gfx1201` yet).
 
 Key tuning decisions:
-- **MTP4 speculative decoding**: 4 draft tokens per step (~72% acceptance on
-  35B-A3B), roughly doubles decode throughput vs no MTP.
+- **MTP4 speculative decoding** (27B only): 4 draft tokens per step (~72% acceptance
+  on 27B), roughly doubles decode throughput vs no MTP. MTP is **disabled on 35B-A3B**
+  — see "MTP workaround" below.
 - **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
   throughput regression on RDNA4 — one queue per process avoids kernel launch
   scheduling overhead.
@@ -135,6 +136,24 @@ Key tuning decisions:
   garbage output under triton 3.8.0 (torch 2.13), so fp8 KV is the safe choice.
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
+
+### MTP workaround (35B only)
+
+vLLM's native MTP speculative decoding has a known bug with Qwen3-MoE models
+(`Qwen3.6-35B-A3B`, `Qwen3.6-27B-A3B`) where deep agentic conversations can
+degenerate into garbled token loops producing no usable output
+([vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087)).
+The bug causes output quality collapse — not just slight degradation — and can
+be triggered mid-conversation even after many clean turns.
+
+**Impact on 35B-A3B**: throughput drops from ~185 tg32 (with MTP4) to
+~83 tg32 (no MTP). The 27B (dense) model is unaffected and MTP works correctly.
+
+**Workaround**: `compose.yaml` and `env/qwen3.6-35b-a3b.env` have been patched
+to disable MTP for the 35B model only. The 27B model profile still uses MTP4.
+This resolves to a simple variable override — the 35B profile sets
+`VLLM_SPEC_DECODE=` (empty), which skips the `--speculative-config` flag.
+The 27B profile inherits the shared `VLLM_SPEC_DECODE` from `qwen3.6.env.common`.
 
 ## Dead ends
 
@@ -154,19 +173,19 @@ Key tuning decisions:
 
 ## Performance
 
-Measured on 2× R9700, MTP4, fp8 KV, single request, vLLM 0.27.0, torch 2.13,
+Measured on 2× R9700, fp8 KV, single request, vLLM 0.27.0, torch 2.13,
 triton 3.8.0. No tuned MoE configs — stock triton autotuned defaults.
+MTP4 is enabled for the 27B model; disabled for 35B-A3B (see "MTP workaround").
 
 | model                     | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|-----------:|---------:|----------:|
 | Qwen3.6-27B (Andy & upstream baseline) |     2750 |    81.9 |    —     |
-| Qwen3.6-35B-A3B (no MTP)   |   ~10075 |     ~83 |    —     |
 | Qwen3.6-27B-FP8 (v0.26)     |    ~2927 |     ~75 |    ~66   |
 | Qwen3.6-27B-FP8 (v0.27)     |    ~2916 |     ~87 |    ~76   |
-| Qwen3.6-35B-A3B-FP8 (v0.26) | ~10864 |    ~182 |   ~144   |
-| Qwen3.6-35B-A3B-FP8 (v0.27) | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-FP8 (current) |  ~9381 |    ~185 |    ~156   |
-| Qwen3.6-27B-FP8 (current)     |  ~2924 |     ~87 |     ~76   |
+| Qwen3.6-35B-A3B-FP8 (v0.26)    | ~10864 |    ~182 |   ~144   |
+| Qwen3.6-35B-A3B-FP8 (v0.27)    | ~11143 |    ~189 |   ~151   |
+| Qwen3.6-35B-A3B-FP8 (MTP disabled) | ~10075 |     ~83 |    —     |
+| Qwen3.6-27B-FP8 (current)      |  ~2924 |     ~87 |     ~76   |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
@@ -174,7 +193,9 @@ Full methodology, depth sweeps, and tuning history in
 ### Long-context concurrency
 
 Decode cost is dominated by attending over the cached KV, so concurrent
-deep-context requests degrade sharply. Measured on 35B-A3B (tg32, MTP4);
+deep-context requests degrade sharply. The table below was measured on 35B-A3B
+(tg32, MTP4). The current production config has MTP disabled for 35B per the
+workaround above — actual throughput at every depth is ~2x lower.
 `c2 total` = aggregate across 2 concurrent requests, `c2/req` = per request.
 
 | depth | c1 | c2 total | c2/req |

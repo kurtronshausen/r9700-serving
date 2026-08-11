@@ -80,4 +80,4 @@ services:
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-fp8}
       -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN
-      --speculative-config '${VLLM_SPEC_DECODE:?set in env/$MODEL_PROFILE.env}'
+      ${VLLM_SPEC_DECODE:+--speculative-config '${VLLM_SPEC_DECODE}'}
