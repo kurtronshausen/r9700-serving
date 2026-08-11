@@ -62,8 +62,9 @@ Runtime environment is split across files:
 
 ### Chat template
 
-vLLM's built-in Qwen3.6 chat template is used (no `--chat-template` /
-`--default-chat-template-kwargs` flags).
+The froggeric v21.3 chat template (`chat-templates/qwen36.jinja`) is wired in via
+`--chat-template` — it partitions thinking into the `reasoning` field and the
+final answer into `content`.
 
 ### Non-standard vLLM flags
 
