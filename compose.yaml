@@ -33,7 +33,6 @@ services:
         MAX_JOBS: ${MAX_JOBS}
         TORCH_VERSION: ${TORCH_VERSION}
         TORCHVISION_VERSION: ${TORCHVISION_VERSION}
-        TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}
         VLLM_REF: ${VLLM_REF}
         VLLM_VERSION: ${VLLM_VERSION}
         AITER_REF: ${AITER_REF}
@@ -68,7 +67,7 @@ services:
       --chat-template /app/chat-templates/qwen36.jinja
       ${VLLM_TOOL_CHOICE}
       --max-model-len 131072
-      --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}
+      --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
       --gpu-memory-utilization 0.8

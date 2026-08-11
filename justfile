@@ -51,6 +51,18 @@ up:
     source "env/{{model}}.env"
     MODEL_PROFILE={{model}}
     {{runtime}} compose up -d
+    printf 'Waiting for server to be ready ...\n'
+    for _ in $(seq 1 90); do
+        if curl -sf --max-time 3 http://localhost:8180/v1/models > /dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+    printf 'Warming up Triton kernels ...\n'
+    curl -s --max-time 120 http://localhost:8180/v1/chat/completions \
+        -H 'Content-Type: application/json' \
+        -d '{"model":"{{model}}","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":100,"temperature":0}' \
+        > /dev/null 2>&1 && printf 'Warmup complete.\n' || printf 'Warmup failed (server may still be starting).\n'
 
 logs:
     @{{runtime}} compose logs -f
