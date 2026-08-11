@@ -53,7 +53,7 @@ up:
     {{runtime}} compose up -d
     printf 'Waiting for server to be ready ...\n'
     for _ in $(seq 1 90); do
-        if curl -sf --max-time 3 http://localhost:8180/v1/models > /dev/null 2>&1; then
+        if curl -sf --max-time 3 http://localhost:8180/health > /dev/null 2>&1; then
             break
         fi
         sleep 2
@@ -63,6 +63,18 @@ up:
         -H 'Content-Type: application/json' \
         -d '{"model":"{{model}}","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":100,"temperature":0}' \
         > /dev/null 2>&1 && printf 'Warmup complete.\n' || printf 'Warmup failed (server may still be starting).\n'
+
+# Run a command inside the running vLLM container (e.g. `just exec bash`).
+exec *args:
+    @{{runtime}} compose exec vllm {{args}}
+
+# Send a chat completion request to the running server.
+chat prompt max_tokens="100":
+    #!/usr/bin/env bash
+    curl -s http://localhost:8180/v1/chat/completions \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"{{model}}\",\"messages\":[{\"role\":\"user\",\"content\":\"{{prompt}}\"}],\"max_tokens\":{{max_tokens}},\"temperature\":0}" \
+        | python3 -m json.tool 2>/dev/null || cat
 
 logs:
     @{{runtime}} compose logs -f

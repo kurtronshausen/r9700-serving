@@ -1,0 +1,25 @@
+# Build cache directories (bind-mounted at runtime, not needed in image)
+triton_cache/
+# Benchmark history
+benchmarks/
+# Git history
+.git/
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+# Project docs (not needed in image)
+*.md
+AGENTS.md
+.opencode/
+# Environment files (should never leak into image)
+.env
+env/
+# OS cruft
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+*.pyo

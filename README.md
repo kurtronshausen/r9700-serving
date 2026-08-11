@@ -69,8 +69,10 @@ final answer into `content`.
 ### Non-standard vLLM flags
 
 - **`--enable-auto-tool-choice --tool-call-parser qwen3_coder
-  --reasoning-parser qwen3`** (`VLLM_TOOL_CHOICE`, 35B profile): OpenAI
-  tool-calling with Qwen's `qwen3_coder` parser.
+  --reasoning-parser qwen3`** (`VLLM_TOOL_CHOICE`, both profiles): OpenAI
+  tool-calling with Qwen's `qwen3_coder` parser. `--reasoning-parser qwen3` is
+  also required for the froggeric chat template to correctly split thinking
+  into the `reasoning` field.
 - **`--limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'`**: multimodal
   images allowed, audio/video disabled.
 - **`--override-generation-config`**: server-side sampling defaults
@@ -156,7 +158,8 @@ triton 3.8.0. No tuned MoE configs — stock triton autotuned defaults.
 | Qwen3.6-27B-FP8 (v0.27)     |    ~2916 |     ~87 |    ~76   |
 | Qwen3.6-35B-A3B-FP8 (v0.26) | ~10864 |    ~182 |   ~144   |
 | Qwen3.6-35B-A3B-FP8 (v0.27) | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-FP8 (current) |   9346 |     177 |     143   |
+| Qwen3.6-35B-A3B-FP8 (current) |  ~9381 |    ~185 |    ~156   |
+| Qwen3.6-27B-FP8 (current)     |  ~2924 |     ~87 |     ~76   |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).

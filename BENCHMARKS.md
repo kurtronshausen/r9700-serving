@@ -87,6 +87,12 @@ Two R9700s on separate PCIe 5.0 x8 root ports, P2P disabled
 
 ## Concurrency
 
+> **Note:** The depth sweep and concurrency benchmarks referenced below were
+> run with **bf16 KV** and **tuned fused_moe configs** as part of the MoE tuning
+> A/B test. The running config uses fp8 KV + stock MoE autotuning. The concurrency
+> *behavior* (c1 vs c2, depth scaling) is expected to be independent of these
+> tuning differences and still valid.
+
 35B-A3B. The table below is the original MTP3-era data; current MTP4 findings
 follow. `total` = aggregate across all concurrent requests, `req` = per
 request.
