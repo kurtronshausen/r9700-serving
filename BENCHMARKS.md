@@ -9,7 +9,8 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 0.8`, `-tp 2`, MTP4, `--kv-cache-dtype fp8`, `GPU_MAX_HW_QUEUES=1`.
 Single-request numbers are invariant to `--max-num-seqs`; the server runs at
 `--max-num-seqs 1` because concurrency loses to serial on this stack (see
-Concurrency).
+Concurrency). The froggeric v21.3 chat template (`chat-templates/qwen36.jinja`)
+is wired via `--chat-template` (reasoning → `reasoning`, answer → `content`).
 
 ## Current (2026-08-11, vLLM 0.27.0, torch 2.13, triton 3.8.0, fp8 KV)
 
