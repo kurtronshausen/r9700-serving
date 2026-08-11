@@ -49,6 +49,7 @@ services:
     env_file:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
+      - env/qwen3.6.env.common
       - ./env/${MODEL_PROFILE}.env
     environment:
       - GPU_MAX_HW_QUEUES=1
@@ -62,20 +63,21 @@ services:
     command: >
       ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
+      ${VLLM_MODEL_REVISION:+--revision "${VLLM_MODEL_REVISION}"}
       --served-model-name ${VLLM_SERVED_NAME:?set in env/$MODEL_PROFILE.env}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       --chat-template /app/chat-templates/qwen36.jinja
       ${VLLM_TOOL_CHOICE:-}
-      --max-model-len 131072
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-131072}
       --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
-      --gpu-memory-utilization 0.8
+      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.8}
       --host 0.0.0.0
       --port 8180
       --dtype auto
-      --max-num-seqs 1
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-1}
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-fp8}
-      -tp 2
+      -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN
       --speculative-config '${VLLM_SPEC_DECODE:?set in env/$MODEL_PROFILE.env}'

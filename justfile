@@ -13,10 +13,11 @@ model := env_var_or_default('MODEL_PROFILE', 'qwen3.6-35b-a3b')
 # Exported so compose can resolve the `env_file:` path for the model profile.
 export MODEL_PROFILE := model
 
-# Every compose call must load both `.env` (build pins) and the model profile
-# (server arguments), since `compose.yaml` interpolates from both. Passing
-# `--env-file` disables the implicit `.env`, so it is listed explicitly.
-compose := runtime + " compose --env-file .env --env-file env/" + model + ".env"
+# Every compose call must load `.env` (build pins) plus the env_file stack
+# that compose.yaml declares (common → aiter → qwen3.6 → profile), because
+# passing --env-file disables the implicit .env resolution, so each must be
+# listed explicitly.
+compose := runtime + " compose --env-file .env --env-file env/2xr9700.vllm.common --env-file env/aiter-unified-attention.env --env-file env/qwen3.6.env.common --env-file env/" + model + ".env"
 
 _default:
     @just --list
