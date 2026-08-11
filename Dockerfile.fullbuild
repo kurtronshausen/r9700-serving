@@ -60,12 +60,11 @@ RUN python3 -m venv /opt/venv \
 RUN --mount=type=cache,target=/root/.cache/pip \
     : "${TORCH_VERSION:?set TORCH_VERSION to the pinned torch version}" \
     && : "${TORCHVISION_VERSION:?set TORCHVISION_VERSION to the pinned torchvision version}" \
-    && : "${TORCHAUDIO_VERSION:?set TORCHAUDIO_VERSION to the pinned torchaudio version}" \
     && python -m pip install \
         --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
-        "torch[device-${GPU_ARCH}]==${TORCH_VERSION}" \
-        "torchvision[device-${GPU_ARCH}]==${TORCHVISION_VERSION}" \
-        "torchaudio==${TORCHAUDIO_VERSION}"
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "amd-torch-device-${GPU_ARCH}==${TORCH_VERSION}"
 
 RUN python - <<'PY'
 import torch
@@ -122,14 +121,6 @@ RUN mkdir aiter \
     && git -C aiter checkout --detach FETCH_HEAD \
     && git -C aiter submodule update --init --recursive --depth=1
 
-COPY patches/aiter/ /patches/aiter/
-
-RUN cd /src/aiter \
-    && for patch in /patches/aiter/*.patch; do \
-         [ -e "$patch" ] || continue; \
-         git apply "$patch"; \
-       done
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd /src/aiter \
     && python -m pip install -r requirements.txt \
@@ -170,7 +161,8 @@ RUN cd /src/vllm \
     && python use_existing_torch.py --prefix \
     && python -m pip install -r requirements/rocm.txt
 
-RUN cd /src/vllm \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /src/vllm \
     && ./tools/install_protoc.sh \
     && bash build_rust.sh
 
@@ -203,6 +195,11 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # -----------------------------------------------------------------------------
 
 FROM framework-base AS runtime
+
+# Remove build-only packages to shrink runtime image; keep curl for healthcheck
+RUN apt-get update && apt-get purge -y --autoremove \
+        build-essential rustc cargo mold ninja-build ccache \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=flash-attention-builder /wheels/ /install/
 COPY --from=aiter-builder /wheels/ /install/
