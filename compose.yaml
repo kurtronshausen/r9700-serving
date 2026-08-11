@@ -1,6 +1,5 @@
 x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   - ./chat-templates/:/app/chat-templates
-  - ./fused_moe_configs/:/app/fused_moe_configs
   - ${HOME}/.cache/huggingface:/root/.cache/huggingface
   - ${HOME}/.cache/vllm:/root/.cache/vllm
   - ${HOME}/.cache/triton:/root/.cache/triton
@@ -54,7 +53,6 @@ services:
     environment:
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
-      - VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs
     command: >
       ${VLLM_MODEL}
       --tokenizer ${VLLM_TOKENIZER}
@@ -67,7 +65,7 @@ services:
       --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
-      --gpu-memory-utilization 0.9
+      --gpu-memory-utilization 0.8
       --host 0.0.0.0
       --port 8180
       --dtype auto
