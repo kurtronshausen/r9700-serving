@@ -60,9 +60,9 @@ services:
       retries: 3
       start_period: 120s
     command: >
-      ${VLLM_MODEL}
-      --tokenizer ${VLLM_TOKENIZER}
-      --served-model-name ${VLLM_SERVED_NAME}
+      ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
+      --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
+      --served-model-name ${VLLM_SERVED_NAME:?set in env/$MODEL_PROFILE.env}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       --chat-template /app/chat-templates/qwen36.jinja
       ${VLLM_TOOL_CHOICE:-}
@@ -78,4 +78,4 @@ services:
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-fp8}
       -tp 2
       --attention-backend ROCM_AITER_UNIFIED_ATTN
-      --speculative-config '${VLLM_SPEC_DECODE}'
+      --speculative-config '${VLLM_SPEC_DECODE:?set in env/$MODEL_PROFILE.env}'

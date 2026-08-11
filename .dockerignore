@@ -1,5 +1,3 @@
-# Build cache directories (bind-mounted at runtime, not needed in image)
-triton_cache/
 # Benchmark history
 benchmarks/
 # Git history
@@ -12,7 +10,6 @@ benchmarks/
 *~
 # Project docs (not needed in image)
 *.md
-AGENTS.md
 .opencode/
 # Environment files (should never leak into image)
 .env

@@ -10,8 +10,38 @@ runtime := env_var_or_default('RUNTIME', 'docker')
 # `MODEL_PROFILE=qwen3.6-27b just <recipe>`.
 model := env_var_or_default('MODEL_PROFILE', 'qwen3.6-35b-a3b')
 
+# Exported so compose can resolve the `env_file:` path for the model profile.
+export MODEL_PROFILE := model
+
+# Every compose call must load both `.env` (build pins) and the model profile
+# (server arguments), since `compose.yaml` interpolates from both. Passing
+# `--env-file` disables the implicit `.env`, so it is listed explicitly.
+compose := runtime + " compose --env-file .env --env-file env/" + model + ".env"
+
 _default:
     @just --list
+
+# Validate the compose config for the selected model profile.
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -r .env ]; then
+        printf 'error: no .env found. Copy the template: cp .env.example .env\n' >&2
+        exit 1
+    fi
+    profile="env/{{model}}.env"
+    if [ ! -r "$profile" ]; then
+        printf 'error: no such model profile: %s\n' "$profile" >&2
+        printf 'available profiles:\n' >&2
+        for f in env/*.env; do
+            case "$f" in env/aiter-*) continue ;; esac
+            printf '  %s\n' "$(basename "$f" .env)" >&2
+        done
+        exit 1
+    fi
+    {{compose}} config --quiet
+    printf 'Config OK (profile: {{model}}, model: %s).\n' \
+        "$(grep -m1 '^VLLM_MODEL=' "$profile" | cut -d= -f2-)"
 
 # Remove host cache directories mounted into vLLM containers.
 clear-vllm-caches:
@@ -30,7 +60,9 @@ clear-vllm-caches:
 
     printf 'Removing vLLM host cache directories:\n'
     for dir in "${cache_dirs[@]}"; do
-        if [ ! -w "$dir" ]; then
+        if [ ! -e "$dir" ]; then
+            printf '  %s (absent, skipped)\n' "$dir"
+        elif [ ! -w "$dir" ]; then
             printf '  %s (not writable, using sudo)\n' "$dir"
             sudo rm -rf -- "$dir"
         else
@@ -39,45 +71,47 @@ clear-vllm-caches:
         fi
     done
 
-build:
-    @MODEL_PROFILE={{model}} {{runtime}} compose build
+build: check
+    @{{compose}} build
 
-rebuild:
-    @MODEL_PROFILE={{model}} {{runtime}} compose build --no-cache
+rebuild: check
+    @{{compose}} build --no-cache
 
-up:
+up: check
     #!/usr/bin/env bash
-    set -a
-    source "env/{{model}}.env"
-    MODEL_PROFILE={{model}}
-    {{runtime}} compose up -d
+    set -euo pipefail
+    served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
+    {{compose}} up -d
     printf 'Waiting for server to be ready ...\n'
-    for _ in $(seq 1 90); do
+    ready=0
+    for _ in $(seq 1 150); do
         if curl -sf --max-time 3 http://localhost:8180/health > /dev/null 2>&1; then
+            ready=1
             break
         fi
         sleep 2
     done
+    if [ "$ready" -ne 1 ]; then
+        printf 'error: server did not become ready within 300s. Run `just logs`.\n' >&2
+        exit 1
+    fi
     printf 'Warming up Triton kernels ...\n'
-    curl -s --max-time 120 http://localhost:8180/v1/chat/completions \
+    if curl -sf --max-time 300 http://localhost:8180/v1/chat/completions \
         -H 'Content-Type: application/json' \
-        -d '{"model":"{{model}}","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":100,"temperature":0}' \
-        > /dev/null 2>&1 && printf 'Warmup complete.\n' || printf 'Warmup failed (server may still be starting).\n'
+        -d "{\"model\":\"${served_name}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}],\"max_tokens\":100,\"temperature\":0}" \
+        > /dev/null; then
+        printf 'Warmup complete. Serving %s at http://localhost:8180/v1\n' "$served_name"
+    else
+        printf 'error: warmup request failed. Run `just logs`.\n' >&2
+        exit 1
+    fi
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:
-    @{{runtime}} compose exec vllm {{args}}
-
-# Send a chat completion request to the running server.
-chat prompt max_tokens="100":
-    #!/usr/bin/env bash
-    curl -s http://localhost:8180/v1/chat/completions \
-        -H 'Content-Type: application/json' \
-        -d "{\"model\":\"{{model}}\",\"messages\":[{\"role\":\"user\",\"content\":\"{{prompt}}\"}],\"max_tokens\":{{max_tokens}},\"temperature\":0}" \
-        | python3 -m json.tool 2>/dev/null || cat
+    @{{compose}} exec vllm {{args}}
 
 logs:
-    @{{runtime}} compose logs -f
+    @{{compose}} logs -f
 
 down:
-    @{{runtime}} compose down
+    @{{compose}} down

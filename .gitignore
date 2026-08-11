@@ -1,6 +1,4 @@
 .env
-AGENTS.md
-triton_cache/
 __pycache__/
 *.pyc
 *.pyo

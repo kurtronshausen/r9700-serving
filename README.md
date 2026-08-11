@@ -16,7 +16,9 @@ OpenAI-compatible API.
 ## Quick start
 
 ```sh
+cp .env.example .env  # Build version pins + default model profile (untracked)
 just build       # Build localhost/vllm-fullbuild:latest
+just check       # Validate the compose config for the selected profile
 just up          # Start vLLM in the background (default: 35B-A3B MoE)
 just --set model qwen3.6-27b up  # Switch to dense 27B model
 just logs        # Follow service logs
@@ -28,13 +30,18 @@ Run `just --list` to see all recipes including `rebuild` (force-rebuild) and
 `clear-vllm-caches` (wipe host-side Triton/Inductor/AITER caches; preserves
 HuggingFace model cache).
 
+Always go through `just`: `compose.yaml` interpolates the model arguments from
+`env/<profile>.env`, which the recipes pass to compose via `--env-file`. A bare
+`docker compose up` fails with a required-variable error rather than starting a
+server with no model.
+
 The vLLM OpenAI-compatible API is available at `http://localhost:8180/v1`.
 Other containers on the same compose network can reach it via the `llm-backend`
 network alias instead of the host port.
 
 ## Configuration
 
-Build versions are pinned in `.env`.
+Build versions are pinned in `.env` (untracked; copy `.env.example` to create it).
 
 | component    | version |
 |:-------------|:--------|
