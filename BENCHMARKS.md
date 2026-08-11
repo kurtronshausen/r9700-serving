@@ -6,33 +6,26 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 ## Setup
 
 `--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
-0.9`, `-tp 2`, MTP4, `--kv-cache-dtype auto` (bf16), `GPU_MAX_HW_QUEUES=1`.
+0.8`, `-tp 2`, MTP4, `--kv-cache-dtype fp8`, `GPU_MAX_HW_QUEUES=1`.
 Single-request numbers are invariant to `--max-num-seqs`; the server runs at
 `--max-num-seqs 1` because concurrency loses to serial on this stack (see
 Concurrency).
 
-bf16 KV cache requires patching AITER: the Triton unified-attention kernel
-overflows the R9700's 64 KiB LDS at `TILE_SIZE=64` with bf16 K/V tiles. The fix
-caps `TILE_SIZE` to 32 and `num_stages` to 1. Applied via
-[`patches/aiter/unified-attention-bf16-kv.patch`](patches/aiter/).
+## Current (2026-08-11, vLLM 0.27.0, torch 2.13, triton 3.8.0, fp8 KV)
 
-## Current (2026-08-10, vLLM 0.27.0, MTP4, bf16 KV, NCCL 4-ch)
-
-Single-run data; averages across 3 benchmark sets are in the comparison table.
-
-> Note: these runs were measured with the tuned-MoE `fused_moe_configs`
-> deployed (`VLLM_TUNED_CONFIG_FOLDER`). As of the v0.27.0 stable rollback
-> (db5f90b) compose no longer wires those configs in, so the current container
-> build does not deploy them (see README "Key tuning decisions").
+Stock MoE autotuning (no tuned `fused_moe_configs`). Tuned MoE configs gave
+mixed results on 3.8.0 (wins at 0-32K, regression at 64-128K context) — see
+README "Dead ends". The bf16 KV AITER patch was removed after triton 3.8.0
+produced garbage output.
 
 | model                     |   test |       t/s |
 |:--------------------------|-------:|----------:|
 | Qwen/Qwen3.6-27B-FP8      | pp2048 | 2924.03 ± 19.96 |
 | Qwen/Qwen3.6-27B-FP8      |   tg32 |    87.42 ± 0.09 |
 | Qwen/Qwen3.6-27B-FP8      |  tg128 |    76.34 ± 6.50 |
-| Qwen/Qwen3.6-35B-A3B-FP8  | pp2048 | 11287.33 ± 367.56 |
-| Qwen/Qwen3.6-35B-A3B-FP8  |   tg32 |   188.80 ± 13.15 |
-| Qwen/Qwen3.6-35B-A3B-FP8  |  tg128 |   150.74 ± 11.28 |
+| Qwen/Qwen3.6-35B-A3B-FP8  | pp2048 |  9380.89 ± 176.12 |
+| Qwen/Qwen3.6-35B-A3B-FP8  |   tg32 |   185.46 ± 13.16 |
+| Qwen/Qwen3.6-35B-A3B-FP8  |  tg128 |   155.70 ± 23.08 |
 
 ### v0.26 → v0.27 upgrade
 
@@ -54,11 +47,11 @@ multi-layer MTP refactor. Both models show consistent gains with no regressions.
 |:---------------------------------|-----------:|---------:|------:|
 | 27B andy upstream (MTP3, fp8 KV) |     2750   |   81.9   | v0.25 |
 | 35B-A3B no MTP, stock config     |   ~10075   |    ~83   | v0.26 |
-| 27B (MTP4, bf16 KV, all opts)    |    ~2916   |    ~87   | v0.27 |
-| 35B (MTP4, bf16 KV, all opts)    |   ~11143   |   ~189   | v0.27 |
+| 27B (MTP4, fp8 KV, all opts)    |    ~2916   |    ~87   | v0.27 |
+| 35B (MTP4, fp8 KV, all opts)    |   ~11143   |   ~189   | v0.27 |
 
 The 35B-A3B MoE model is 3.8× faster on prefill and 2.2× faster on decode than
-the dense 27B. MTP4 + tuned MoE configs + NCCL tuning + v0.27 deliver 2.3×
+the dense 27B. MTP4 + NCCL tuning + v0.27 deliver 2.3×
 decode throughput over the no-MTP baseline.
 
 ## MTP impact (35B-A3B)
@@ -147,39 +140,27 @@ latency is worse (incremental TTFT @ d64000 1070 vs 1562 ms; full-context load
 multiple users must progress simultaneously at ~45-55% lower per-request
 decode.
 
-## Depth sweep (35B-A3B, MTP4)
+## Depth sweep (35B-A3B, MTP4, fp8 KV, stock MoE)
 
 Single-request speeds at increasing prompt depth (d = prefix tokens before the
-2048-token prompt), current stack. `pp2048` = **incremental** prefill of only the
+2048-token prompt). `pp2048` = **incremental** prefill of only the
 2048 fresh tokens (depth prefix cached via `--enable-prefix-caching`); each new
-token attends over the full cached KV, so this falls with depth. Full-context
-rows (`ctx_pp`, e2e TTFT) are the comparable-to-old metric. Full table in
-[`08_10_qwen3.6-35b-a3b_mtp4_depth.md`](benchmarks/08_10_qwen3.6-35b-a3b_mtp4_depth.md).
+token attends over the full cached KV, so this falls with depth. `ctx_pp` =
+full-context prefill (`depth + 2048`), comparable to pre-PC "pp2048 @ dXXX".
 
-> Note: the old MTP3 sweep's `pp2048 @ dXXX` column measured full-context
-> prefill (depth + 2048, uncached). Compare against the new `ctx_pp` rows, not
-> `pp2048`: old 10043 @ d4096 → ctx_pp 11247, old 6774 @ d64000 → ctx_pp 6878,
-> e2e TTFT @ d64000 9750 → 9308 ms. No regression.
+| depth | ctx_pp (t/s) | ctx_tg (t/s) | pp2048 (t/s) | tg32 (t/s) | ctx_e2e (ms) |
+|------:|-------------:|-------------:|-------------:|-----------:|-------------:|
+| 0 | — | — | 9381 | 185 | — |
+| 1024 | 7462 | 170 | 6847 | 195 | 3072 |
+| 4096 | 9695 | 185 | 3474 | 173 | 6144 |
+| 8192 | 10189 | 166 | 3433 | 173 | 10240 |
+| 16384 | 9652 | 172 | 3366 | 162 | 18496 |
+| 32000 | 9038 | 158 | 2710 | 157 | 34816 |
+| 64000 | 7876 | 132 | 2314 | 149 | 66816 |
+| 128000 | 6315 | 94 | 1379 | 114 | 130176 |
 
-| test            |               t/s |       ttfr (ms) |
-|:----------------|------------------:|----------------:|
-| pp2048 @ d0     | 8386.44 ± 3406.48 |   318.82 ± 181.06 |
-| tg32 @ d0       |    187.97 ± 11.48 |                 |
-| pp2048 @ d1024  |  6998.75 ± 111.74 |    293.66 ± 4.62 |
-| tg32 @ d1024    |     196.10 ± 0.22 |                 |
-| pp2048 @ d4096  |   5397.80 ± 11.07 |    380.37 ± 0.78 |
-| tg32 @ d4096    |    175.41 ± 17.97 |                 |
-| pp2048 @ d8192  |   5080.98 ± 8.20  |    404.03 ± 0.65 |
-| tg32 @ d8192    |    174.81 ± 18.35 |                 |
-| pp2048 @ d16384 |   4402.15 ± 4.97  |    466.19 ± 0.53 |
-| tg32 @ d16384   |     175.45 ± 0.81 |                 |
-| pp2048 @ d32000 |   3105.65 ± 8.75  |    660.41 ± 1.86 |
-| tg32 @ d32000   |     149.69 ± 8.02 |                 |
-| pp2048 @ d64000 |   1907.59 ± 20.29 |   1074.68 ± 11.37 |
-| tg32 @ d64000   |     180.88 ± 23.24 |                 |
-
-Decode stays flat ~150-196 t/s across all depths. Incremental prefill drops
-with depth (attention span over the cached prefix grows): ~7000 t/s at d1024 →
-~1900 t/s at d64000. TTFT of the incremental prompt grows sub-linearly with
-depth thanks to prefix caching (294 → 1075 ms); full-context e2e TTFT scales
-linearly (258 ms @ d1024 → 9308 ms @ d64000).
+Incremental prefill drops with depth (attention span over the cached prefix
+grows): ~6847 t/s at d1024 → ~1379 t/s at d128K. Decode is mostly flat
+114-195 t/s, with the expected shallow-context bump from full-budget cudagraphs.
+Full-e2e TTFT scales linearly with total context loaded (cache-friendly 6.3K
+t/s ctx_pp up to ~6K depth, degrading at 128K to 6.3K with 20.3s TTFT).
