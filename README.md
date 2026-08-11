@@ -39,7 +39,7 @@ Build versions are pinned in `.env`.
 | component    | version |
 |:-------------|:--------|
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
-| PyTorch      | 2.12.0+rocm7.14.0 |
+| PyTorch      | 2.13.0+rocm7.14.0 |
 | vLLM         | 0.27.0 |
 | AITER        | v0.1.19.post2 |
 | Flash Attention | @ 1cc7ff67 |
@@ -78,7 +78,9 @@ final answer into `content`.
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
   **`--gpu-memory-utilization 0.8`**.
-- **`--kv-cache-dtype auto`** (`VLLM_KV_CACHE_DTYPE`) — fp8 for these models.
+- **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`). bf16 KV required an AITER
+  LDS-fit patch under triton 3.7.1 (torch 2.12) that produced garbage output under
+  triton 3.8.0 (torch 2.13), so fp8 is the safe choice.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4, see above).
 
@@ -127,11 +129,13 @@ Key tuning decisions:
 
 ## Dead ends
 
-- **Tuned MoE kernel configs** (`fused_moe_configs/`): per-token-count optimal
-  Triton tile configs for the stock vLLM `fused_experts` kernel. Measured +5-11%
-  prefill / +6-11% tg32 decode in the 08-09 A/B, but removed after the torch
-  2.13 / triton 3.8 bump — the 3.6.0-tuned tile configs are not safe to apply
-  verbatim under triton 3.8 codegen, so MoE now uses stock autotuned defaults.
+- **Tuned MoE kernel configs**: per-token-count optimal Triton tile configs for
+  the stock vLLM `fused_experts` kernel. Re-tuned for triton 3.8.0 and A/B tested
+  vs stock defaults (depth 0–128K). Gains at 0–32K depth (ctx_tg +16% at d32K,
+  tg32 +13% at d16K) but **losses at deep context** (ctx_tg −14% at d64K,
+  −13% at d128K; tg32 −9% at d128K). The sweep picks configs that favor
+  shallow-batch MoE at the expense of deep-context codegen — not safe to deploy
+  for long-context serving. Dropped; MoE uses stock autotuned defaults.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
 - **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
@@ -141,7 +145,8 @@ Key tuning decisions:
 
 ## Performance
 
-Measured on 2× R9700, MTP4, fp8 KV, single request, vLLM 0.27.0.
+Measured on 2× R9700, MTP4, fp8 KV, single request, vLLM 0.27.0, torch 2.13,
+triton 3.8.0. No tuned MoE configs — stock triton autotuned defaults.
 
 | model                     | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|-----------:|---------:|----------:|
@@ -151,6 +156,7 @@ Measured on 2× R9700, MTP4, fp8 KV, single request, vLLM 0.27.0.
 | Qwen3.6-27B-FP8 (v0.27)     |    ~2916 |     ~87 |    ~76   |
 | Qwen3.6-35B-A3B-FP8 (v0.26) | ~10864 |    ~182 |   ~144   |
 | Qwen3.6-35B-A3B-FP8 (v0.27) | ~11143 |    ~189 |   ~151   |
+| Qwen3.6-35B-A3B-FP8 (current) |   9346 |     177 |     143   |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
