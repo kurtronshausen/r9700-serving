@@ -57,10 +57,8 @@ services:
       ${VLLM_MODEL}
       --tokenizer ${VLLM_TOKENIZER}
       --served-model-name ${VLLM_SERVED_NAME}
-      --chat-template ${VLLM_CHAT_TEMPLATE}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       ${VLLM_TOOL_CHOICE}
-      --default-chat-template-kwargs '${VLLM_CHAT_KWARGS:-}'
       --max-model-len 131072
       --max-num-batched-tokens ${VLLMM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
