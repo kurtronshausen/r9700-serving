@@ -189,8 +189,8 @@ disabled for 35B-A3B (see "MTP bug" above).
 | Qwen3.6-27B-FP8 (v0.27)         |    ~2916 |     ~87 |    ~76   |
 | Qwen3.6-35B-A3B-FP8 (v0.26)     | ~10864 |    ~182 |   ~144   |
 | Qwen3.6-35B-A3B-FP8 (v0.27)     | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | ~10260 |    ~87  |    ~87   |
-| Qwen3.6-27B-BF16+MTP4           |    ~2924 |     ~87 |     ~76   |
+| Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | ~8788 |   ~87.8 |   ~87.1  |
+| Qwen3.6-27B-BF16+MTP4           |    ~2471 |   ~80.6 |   ~63.7  |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
