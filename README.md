@@ -138,7 +138,8 @@ Key tuning decisions:
   the 5 per-GPU weight shapes for both 35B-A3B and 27B (TP=2) are now tuned for the
   R9700 via `tools/tune_fp8_dense.py`. Sweeps 576 Triton tile configurations per shape
   with fp32-reference numeric gating (eliminating structurally invalid configs — BK=256
-  mixes 128-wide scale groups). Decode throughput up ~3-5% vs stock defaults.
+  mixes 128-wide scale groups). Same-boot A/B vs stock defaults: **35B tg32 +4%, tg128 +5%;
+  27B tg32 +19%, pp2048 +3%** (tg128 flat).
 - **Tuned fused MOE configs** (`fused_moe_configs/E=256,N=256,...json`): tuned via
   `tools/tune_fused_moe.py`. vLLM keys the config file on the per-GPU geometry at
   TP size 2 (`E=256,N=256` = local experts × local intermediate); an earlier
@@ -189,7 +190,9 @@ disabled for 35B-A3B (see "MTP bug" above).
 | Qwen3.6-35B-A3B-FP8 (v0.26)     | MTP4, fp8 KV       | ~10864 |    ~182 |   ~144   |
 | Qwen3.6-35B-A3B-FP8 (v0.27)     | MTP4, fp8 KV       | ~11143 |    ~189 |   ~151   |
 | Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | MTP off       | ~8788 |   ~87.8 |   ~87.1  |
+| Qwen3.6-35B-A3B-BF16+MoETuned+DenseTuned+MtPOff | MTP off, tuned dense | ~8510 |  **91.0** |  **91.3** |
 | Qwen3.6-27B-BF16+MTP4           | MTP4, bf16 KV       |    ~2471 |   ~80.6 |   ~63.7  |
+| Qwen3.6-27B-BF16+MTP4+DenseTuned | MTP4, bf16 KV, tuned dense | ~2500 |  **90.8** |   ~69  |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
