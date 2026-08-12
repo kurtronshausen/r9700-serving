@@ -197,6 +197,19 @@ disabled for 35B-A3B (see "MTP bug" above).
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
 
+### Depth sweep (35B-A3B, MTP off, tuned dense vs stock)
+
+Deep-context decode is dominated by attention over the cached KV, so the GEMM
+tuning benefit narrows with depth. Same-boot A/B (bf16 KV, tuned MoE, thinking
+off):
+
+| depth | stock tg32 | +tuned dense tg32 | uplift |
+|------:|-----------:|------------------:|:------|
+| 0     | 86.8 | **90.3** | +4% |
+| 4096  | 86.8 | **91.4** | +5% |
+| 65536 | 78.2 | **79.1** | +1% |
+| 128000| 71.4 | **72.3** | +1% |
+
 ### Long-context concurrency
 
 Decode cost is dominated by attending over the cached KV, so concurrent
