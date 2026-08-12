@@ -4,16 +4,34 @@ import json
 import time
 
 import torch
+import triton
 
 import vllm.model_executor.layers.fused_moe.fused_moe as fm
 from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 
+# The repo serves Qwen3.6-35B-A3B-FP8 at tensor-parallel size 2. vLLM keys the
+# fused MoE config file on the per-GPU geometry (E = local experts, N = local
+# intermediate size), so N is the per-partition intermediate (global 512 / 2).
 E = 256
-N = 512
+N = 256
 K = 2048
 TOP_K = 8
 BLOCK_SHAPE = [128, 128]
+
+CONFIG_FILE = ("/app/fused_moe_configs/"
+               "E=256,N=256,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,"
+               "block_shape=[128,128].json")
+
+DEFAULT_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "BLOCK_SIZE_K": 128,
+    "GROUP_SIZE_M": 4,
+    "num_warps": 8,
+    "num_stages": 2,
+    "waves_per_eu": 0,
+}
 
 
 def make_tensors(M: int, device="cuda"):
@@ -29,8 +47,8 @@ def make_tensors(M: int, device="cuda"):
     return hidden, w1, w2, topk_weights, topk_ids, q
 
 
-def bench_one(M, cfg, reps=50, warmup=5):
-    hidden, w1, w2, topk_weights, topk_ids, q = make_tensors(M)
+def bench_one(M, cfg, tensors, reps=50, warmup=5):
+    hidden, w1, w2, topk_weights, topk_ids, q = tensors
     try:
         with override_config(cfg):
             for _ in range(warmup):
@@ -93,13 +111,12 @@ def main():
     ap.add_argument("--M", type=str,
                     default="1,2,4,8,16,24,32,48,64,96,128,256,512,1024,1536,2048,3072,4096")
     ap.add_argument("--reps", type=int, default=50)
-    ap.add_argument("--out", type=str,
-                    default="/app/fused_moe_configs/E=256,N=512,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json")
-    ap.add_argument("--seed", type=str,
-                    default="/app/fused_moe_configs/E=256,N=512,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json")
+    ap.add_argument("--out", type=str, default=CONFIG_FILE)
+    ap.add_argument("--seed", type=str, default=CONFIG_FILE)
     ap.add_argument("--no-sweep", action="store_true")
     args = ap.parse_args()
 
+    print(f"triton {triton.__version__}", flush=True)
     Ms = [int(x) for x in args.M.split(",")]
 
     seed = {}
@@ -113,21 +130,22 @@ def main():
 
     results = {}
     for M in Ms:
-        base = seed_cfgs.get(M) or seed_cfgs.get(
-            min(seed_cfgs, key=lambda k: abs(k - M)) if seed_cfgs else None, {})
-        if args.no_sweep or not base:
-            configs = [base] if base else [{
-                "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128,
-                "GROUP_SIZE_M": 4, "num_warps": 8, "num_stages": 2,
-                "waves_per_eu": 0}]
-        else:
-            configs = variants(base)
+        base = seed_cfgs.get(M)
+        if base is None:
+            if seed_cfgs:
+                base = seed_cfgs[min(seed_cfgs, key=lambda k: abs(k - M))]
+            else:
+                base = dict(DEFAULT_CONFIG)
+        configs = [base] if args.no_sweep else variants(base)
+        # Allocate the benchmark tensors once per M and reuse across configs;
+        # regenerating them per candidate wasted ~0.5 GB allocs and added noise.
+        tensors = make_tensors(M)
         print(f"M={M}: sweeping {len(configs)} configs from seed "
               f"{base.get('BLOCK_SIZE_M')}/{base.get('BLOCK_SIZE_N')}/"
               f"{base.get('BLOCK_SIZE_K')}", flush=True)
         scored = []
         for cfg in configs:
-            t = bench_one(M, cfg, reps=args.reps)
+            t = bench_one(M, cfg, tensors, reps=args.reps)
             if t is not None:
                 scored.append((t, cfg))
             print(f"  {cfg['BLOCK_SIZE_M']}/{cfg['BLOCK_SIZE_N']}/"
@@ -144,7 +162,7 @@ def main():
               f"w{best['num_warps']} s{best['num_stages']} "
               f"wpe{best['waves_per_eu']}: {bt*1e6:.0f} us", flush=True)
 
-    out = {"triton_version": "3.7.1"}
+    out = {"triton_version": triton.__version__}
     out.update({str(M): cfg for M, cfg in results.items()})
     with open(args.out, "w") as f:
         json.dump(out, f, indent=4)

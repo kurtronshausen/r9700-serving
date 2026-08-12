@@ -134,11 +134,16 @@ Key tuning decisions:
   P2P disabled.
 - **BF16 KV cache**: restored via an AITER LDS-fit patch. Prior "garbage" output
   was caused by MTP token loops, not the patch. BF16 at ~88 t/s outperforms fp8.
-- **Tuned fused MOE configs** (`fused_moe_configs/E=256,N=512,...json`): re-tuned
-  for Triton 3.8.0 via `tools/tune_fused_moe.py`. Per-token-count optimal tile
-  configs improve shallow-context throughput (ctx_tg +16% at d32K, tg32 +13% at
-  d16K) with safe defaults for deep context. Sourced from vLLM stock `fused_moe`
-  kernel, enabled via `VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs`.
+- **Tuned dense w8a8 block-FP8 configs** (`fp8_configs/N=*,K=*,device_name=AMD_Radeon_R9700,...json`):
+  the 5 per-GPU weight shapes for both 35B-A3B and 27B (TP=2) are now tuned for the
+  R9700 via `tools/tune_fp8_dense.py`. Sweeps 576 Triton tile configurations per shape
+  with fp32-reference numeric gating (eliminating structurally invalid configs — BK=256
+  mixes 128-wide scale groups). Decode throughput up ~3-5% vs stock defaults.
+- **Tuned fused MOE configs** (`fused_moe_configs/E=256,N=256,...json`): tuned via
+  `tools/tune_fused_moe.py`. vLLM keys the config file on the per-GPU geometry at
+  TP size 2 (`E=256,N=256` = local experts × local intermediate); an earlier
+  `E=256,N=512` file never matched, so the server silently ran the stock MoE
+  config. Enabled via `VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs`.
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
 
@@ -163,12 +168,6 @@ the 35B model only. The 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
 
 ## Dead ends
 
-- **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
-  upstream AITER adds RDNA4 support.
-- **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
-  the 35B-A3B (tg32 160-175 vs ~181-191, tg128 135-137 vs ~146) with flat
-  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2. Skip at
-  this scale; revisit only for much larger active-parameter MoEs.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
 - **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on

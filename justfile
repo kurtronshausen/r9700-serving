@@ -118,15 +118,17 @@ bench: check
     #!/usr/bin/env bash
     set -euo pipefail
     model="$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2-)"
+    served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
     tokenizer="$(grep -m1 '^VLLM_TOKENIZER=' "env/{{model}}.env" | cut -d= -f2-)"
     printf 'Benchmarking %s (pp2048, tg32+128) ...\n\n' "$model"
     uvx llama-benchy@0.4.0 --base-url http://localhost:8180/v1 \
-        --model "$model" \
+        --model "$served_name" \
         --tokenizer "$tokenizer" \
         --pp 2048 \
         --tg 32 128 \
         --runs 3 \
         --enable-prefix-caching \
+        --extra-body '{"chat_template_kwargs":{"enable_thinking":false}}' \
         --format md
 
 down:

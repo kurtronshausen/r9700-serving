@@ -2,6 +2,18 @@ x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   - ./chat-templates/:/app/chat-templates
   - ./fused_moe_configs/:/app/fused_moe_configs
   - ./tools/tune_fused_moe.py:/app/tune_fused_moe.py
+  - ./fp8_configs/:/app/fp8_configs
+  - ./tools/tune_fp8_dense.py:/app/tune_fp8_dense.py
+  - ./fp8_configs/N=2048,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=2048,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=2048,K=256,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=2048,K=256,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=4608,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=4608,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=512,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=512,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=6144,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=6144,K=2048,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=17408,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=17408,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=5120,K=3072,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=5120,K=3072,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=5120,K=8704,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=5120,K=8704,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=7168,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=7168,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
+  - ./fp8_configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
   - ${HOME}/.cache/huggingface:/root/.cache/huggingface
   - ${HOME}/.cache/vllm:/root/.cache/vllm
   - ${HOME}/.cache/triton:/root/.cache/triton
