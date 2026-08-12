@@ -182,15 +182,15 @@ Measured on 2× R9700, BF16 KV + tuned MOE config, single request, vLLM 0.27.0,
 torch 2.13, triton 3.8.0+git (ROCm 7.14.0). MTP4 is enabled for the 27B model;
 disabled for 35B-A3B (see "MTP bug" above).
 
-| model                           | pp2048 t/s | tg32 t/s | tg128 t/s |
-|:--------------------------------|-----------:|---------:|----------:|
-| Qwen3.6-27B (Andy & upstream baseline) |     2750 |    81.9 |    —     |
-| Qwen3.6-27B-FP8 (v0.26)         |    ~2927 |     ~75 |    ~66   |
-| Qwen3.6-27B-FP8 (v0.27)         |    ~2916 |     ~87 |    ~76   |
-| Qwen3.6-35B-A3B-FP8 (v0.26)     | ~10864 |    ~182 |   ~144   |
-| Qwen3.6-35B-A3B-FP8 (v0.27)     | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | ~8788 |   ~87.8 |   ~87.1  |
-| Qwen3.6-27B-BF16+MTP4           |    ~2471 |   ~80.6 |   ~63.7  |
+| model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
+|:--------------------------------|:-------------------|-----------:|---------:|----------:|
+| Qwen3.6-27B (Andy & upstream baseline) | MTP3, fp8 KV |     2750 |    81.9 |    —     |
+| Qwen3.6-27B-FP8 (v0.26)         | MTP4, fp8 KV       |    ~2927 |     ~75 |    ~66   |
+| Qwen3.6-27B-FP8 (v0.27)         | MTP4, fp8 KV       |    ~2916 |     ~87 |    ~76   |
+| Qwen3.6-35B-A3B-FP8 (v0.26)     | MTP4, fp8 KV       | ~10864 |    ~182 |   ~144   |
+| Qwen3.6-35B-A3B-FP8 (v0.27)     | MTP4, fp8 KV       | ~11143 |    ~189 |   ~151   |
+| Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | MTP off       | ~8788 |   ~87.8 |   ~87.1  |
+| Qwen3.6-27B-BF16+MTP4           | MTP4, bf16 KV       |    ~2471 |   ~80.6 |   ~63.7  |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
