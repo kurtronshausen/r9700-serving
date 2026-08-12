@@ -152,10 +152,6 @@ into garbled token loops with no usable output. This affects multiple upstream i
 |:------|:--------|
 | [vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087) | MTP token loops on Qwen3-MoE; output quality collapse mid-conversation |
 | [vllm-project/vllm#35288](https://github.com/vllm-project/vllm/issues/35288) | Native MTP speculative decoding instability on MoE architectures |
-| [vllm-project/vllm#50989](https://github.com/vllm-project/vllm/issues/50989) | Strict JSON mode loops on Qwen3 models |
-| [vllm-project/vllm#51008](https://github.com/vllm-project/vllm/issues/51008) | GDN hypothesis bugs causing token degeneration |
-| [vllm-project/vllm#51679](https://github.com/vllm-project/vllm/issues/51679) | Qwen3 tool parser edge cases |
-| [vllm-project/vllm#51858](https://github.com/vllm-project/vllm/issues/51858) | Additional Qwen3.6 parsing & MTP interaction bugs |
 
 **Impact**: 35B-A3B throughput drops from ~185 tg32 (MTP4) to ~83 tg32 (no MTP).
 The 27B (dense) model is unaffected and MTP works correctly.
