@@ -234,3 +234,15 @@ Use concurrency only when multiple users must progress simultaneously and you
 can accept ~45-55% lower per-request decode; for raw throughput or a single
 active session, serial wins. A/Bs of fp8 KV, MTP2, and an 8192-token batch
 budget all lost to the tuned baseline; the cost is inherent to the stack.
+
+## Stability tests
+
+Smoke tests, sustained-load stress, and long-context generation checks for
+catching crashes, memory errors, and token-loop degeneration.
+
+See [`benchmarks/STABILITY_TESTS.md`](benchmarks/STABILITY_TESTS.md) for scripts
+and baseline results. Quick health check:
+
+```sh
+just check && curl -sf http://localhost:8180/health && echo "OK"
+```
