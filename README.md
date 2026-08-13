@@ -113,8 +113,7 @@ and `env/2xr9700.vllm.common` (loaded via `env_file`):
 | `PYTORCH_NVML_BASED_CUDA_CHECK` | `1` | NVML-based CUDA check on ROCm |
 | `FLASH_ATTENTION_TRITON_AMD_ENABLE` | `TRUE` | enable Triton FA on AMD |
 | `TOKENIZERS_PARALLELISM` | `false` | avoid HF tokenizer thread churn |
-| `TORCHINDUCTOR_CACHE_DIR` | `/root/.cache/torchinductor` | persist compile cache (host-mounted) |
-| `TRITON_CACHE_DIR` | `/root/.cache/triton` | persist Triton compile cache (host-mounted) |
+| `HOME` | `$HOME` (compose `user:`) | container runs as host user; whole home mounted, caches redirected under `~/.cache` (`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `TILELANG_CACHE_DIR`) |
 | `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` | `0,1` | select the two R9700s |
 | `HIP_ARCHITECTURES`/`AMDGPU_TARGETS`/etc. | `gfx1201` | target the R9700 ISA |
 

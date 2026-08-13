@@ -14,13 +14,12 @@ x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   - ./fp8_configs/N=5120,K=8704,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=5120,K=8704,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
   - ./fp8_configs/N=7168,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=7168,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
   - ./fp8_configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
-  - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-  - ${HOME}/.cache/vllm:/root/.cache/vllm
-  - ${HOME}/.cache/triton:/root/.cache/triton
-  - ${HOME}/.cache/torchinductor:/root/.cache/torchinductor
-  - ${HOME}/.cache/aiter:/root/.aiter
-  - ${HOME}/.cache/comgr:/root/.cache/comgr
-  - ${HOME}/.cache/tvm-ffi:/root/.cache/tvm-ffi
+  # Mount the whole home so every tool's dot-dir (caches, kernel JIT dirs) is
+  # user-owned on the host. Cache dirs are redirected under ~/.cache via env
+  # (TRITON_CACHE_DIR, TORCHINDUCTOR_CACHE_DIR, AITER_JIT_DIR, TILELANG_CACHE_DIR)
+  # so `just clear-vllm-caches` can manage them.
+  - ${HOME}:${HOME}
+  - ${HOME}/.vllm-workspace:/workspace
 
 x-amd-devices: &amd_devices
   devices:
@@ -28,6 +27,9 @@ x-amd-devices: &amd_devices
     - /dev/dri:/dev/dri
   group_add:
     - "video"
+    # render group gid — host-specific (this host: AMDGPU "render"). Numeric
+    # form required because the image has no "render" group entry.
+    - "992"
   cap_add:
     - SYS_PTRACE
   security_opt:
@@ -38,6 +40,7 @@ services:
   vllm:
     <<: *amd_devices
     image: localhost/vllm-fullbuild:latest
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
     build:
       context: .
       dockerfile: Dockerfile.fullbuild
@@ -66,6 +69,15 @@ services:
       - env/qwen3.6.env.common
       - ./env/${MODEL_PROFILE}.env
     environment:
+      - HOME=${HOME}
+      # Point aiter's JIT build at the user-owned cache dir and put it on
+      # sys.path. Without this, non-root runs fall back to ~/.aiter/jit (not on
+      # sys.path) and `import aiter.jit.module_aiter_core` fails with
+      # ModuleNotFoundError, breaking the unified-attention backend.
+      - AITER_JIT_DIR=${HOME}/.cache/aiter/jit
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor
+      - TILELANG_CACHE_DIR=${HOME}/.cache/tilelang
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
       - VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs

@@ -224,6 +224,9 @@ ENV TOKENIZERS_PARALLELISM=false
 
 WORKDIR /workspace
 
+# The container runs as the host user (compose `user:`); make cwd writable.
+RUN chmod 777 /workspace
+
 EXPOSE 8180
 
 ENTRYPOINT ["vllm", "serve"]

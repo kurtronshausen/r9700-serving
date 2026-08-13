@@ -44,7 +44,35 @@ check:
     printf 'Config OK (profile: {{model}}, model: %s).\n' \
         "$(grep -m1 '^VLLM_MODEL=' "$profile" | cut -d= -f2-)"
 
-# Remove host cache directories mounted into vLLM containers.
+# Ensure the whole-home mount sources exist and are owned by the current user.
+# Docker's daemon pre-creates missing bind-mount sources as root, which breaks
+# non-root container writes and forces sudo for clear-vllm-caches; pre-creating
+# them here prevents that. Individual ~/.cache/* dirs are created lazily by the
+# container as the user, so only the top-level dirs need pre-creation. Safe to
+# run repeatedly.
+ensure-cache-dirs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cache_dirs=(
+        "$HOME/.cache"
+        "$HOME/.vllm-workspace"
+    )
+    uid="$(id -u)"
+    gid="$(id -g)"
+    mkdir -p "${cache_dirs[@]}"
+    needs_sudo=0
+    for dir in "${cache_dirs[@]}"; do
+        if [ "$(stat -c '%u' "$dir")" != "$uid" ]; then
+            needs_sudo=1
+        fi
+    done
+    if [ "$needs_sudo" -eq 1 ]; then
+        printf 'Some cache dirs are root-owned; fixing ownership (one-time sudo required).\n' >&2
+        sudo chown -R "$uid:$gid" "$HOME/.cache" "$HOME/.vllm-workspace"
+    fi
+    printf 'Cache dirs ready (owner: %s).\n' "$(id -un)"
+
+# Remove host cache directories written by the container (under ~/.cache).
 clear-vllm-caches:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -57,6 +85,7 @@ clear-vllm-caches:
         "$HOME/.cache/aiter"
         "$HOME/.cache/comgr"
         "$HOME/.cache/tvm-ffi"
+        "$HOME/.cache/tilelang"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -78,7 +107,27 @@ build: check
 rebuild: check
     @{{compose}} build --no-cache
 
-up: check
+# Build the shared aiter JIT infrastructure (module_aiter_core, the
+# unified-attention triton kernels) in a single throwaway process BEFORE the
+# server starts. On a fresh cache the first `vllm serve` run would otherwise
+# have the model-inspection subprocess and both TP workers racing to build
+# these kernels: losers get `ModuleNotFoundError: aiter.ops.triton.unified_attention`
+# and a subprocess that dies at exit can leave a stale aiter baton lock that
+# deadlocks startup. Warm them first so every later build is a 0s cache hit.
+prewarm: check ensure-cache-dirs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A process that dies mid-build can leave a stale aiter baton lock that
+    # `file_baton` never detects as dead, hanging the next build forever. No
+    # aiter process runs between container stops, so clearing any leftover lock
+    # before building is always safe here.
+    rm -f "$HOME/.cache/aiter/jit/build/lock_"* 2>/dev/null || true
+    printf 'Pre-warming aiter JIT kernels ...\n'
+    {{compose}} run -T --rm --no-deps --entrypoint python vllm \
+        -c "import aiter; from aiter.ops.triton.unified_attention import unified_attention"
+    printf 'aiter pre-warm complete.\n'
+
+up: check ensure-cache-dirs prewarm
     #!/usr/bin/env bash
     set -euo pipefail
     served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
