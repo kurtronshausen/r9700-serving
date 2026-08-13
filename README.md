@@ -19,8 +19,8 @@ OpenAI-compatible API.
 cp .env.example .env  # Build version pins + default model profile (untracked)
 just build       # Build localhost/vllm-fullbuild:latest
 just check       # Validate the compose config for the selected profile
-just up          # Start vLLM in the background (default: 35B-A3B MoE)
-just --set model qwen3.6-27b up  # Switch to dense 27B model
+just up          # Start vLLM in the background (default: dense 27B)
+just --set model qwen3.6-35b-a3b up  # Switch to MoE 35B-A3B model
 just logs        # Follow service logs
 just down        # Stop and remove containers
 ```
@@ -56,10 +56,10 @@ production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.19.post2` is
 the latest tagged release; vLLM is the 0.27.0 release since `gfx1201`
 requires source builds.
 
-The active model is `Qwen/Qwen3.6-35B-A3B-FP8` (MoE, 35B total / 3B active);
-switch to the dense `Qwen/Qwen3.6-27B-FP8` with `just --set model qwen3.6-27b`.
-Model selection is controlled by `MODEL_PROFILE` in `.env` — override inline
-with `MODEL_PROFILE=qwen3.6-27b just up`.
+The active model is `Qwen/Qwen3.6-27B-FP8` (dense, 27B); switch to the MoE
+`Qwen/Qwen3.6-35B-A3B-FP8` (35B total / 3B active) with `just --set model
+qwen3.6-35b-a3b`. Model selection is controlled by `MODEL_PROFILE` in `.env` —
+override inline with `MODEL_PROFILE=qwen3.6-35b-a3b just up`.
 
 Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
