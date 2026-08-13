@@ -47,13 +47,13 @@ Build versions are pinned in `.env` (untracked; copy `.env.example` to create it
 |:-------------|:--------|
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
 | PyTorch      | 2.13.0+rocm7.14.0 |
-| vLLM         | 0.27.0 |
+| vLLM         | 0.27.1 |
 | AITER        | v0.1.19.post2 |
 | Flash Attention | @ 1cc7ff67 |
 
 ROCm 7.14 is on AMDs "TheRock" technology-preview stream (7.9/7.13/7.14); the
 production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.19.post2` is
-the latest tagged release; vLLM is the 0.27.0 release since `gfx1201`
+the latest tagged release; vLLM is the 0.27.1 release since `gfx1201`
 requires source builds.
 
 The active model is `Qwen/Qwen3.6-27B-FP8` (dense, 27B); switch to the MoE
