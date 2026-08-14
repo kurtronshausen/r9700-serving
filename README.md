@@ -59,10 +59,10 @@ production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.19.post2` is
 the latest tagged release; vLLM is the 0.27.1 release since `gfx1201`
 requires source builds.
 
-The active model is `Qwen/Qwen3.6-27B-FP8` (dense, 27B); switch to the MoE
-`Qwen/Qwen3.6-35B-A3B-FP8` (35B total / 3B active) with `just --set model
-qwen3.6-35b-a3b`. Model selection is controlled by `MODEL_PROFILE` in `.env` —
-override inline with `MODEL_PROFILE=qwen3.6-35b-a3b just up`.
+The active model is `Qwen/Qwen3.6-35B-A3B-FP8` (35B total / 3B active, MoE);
+switch to the dense `Qwen/Qwen3.6-27B-FP8` (27B) with `just --set model
+qwen3.6-27b`. Model selection is controlled by `MODEL_PROFILE` in `.env` —
+override inline with `MODEL_PROFILE=qwen3.6-27b just up`.
 
 Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
@@ -89,8 +89,8 @@ final answer into `content`.
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
-- **`--max-model-len 131072`**, **`--max-num-seqs 1`**, **`-tp 2`**,
-  **`--gpu-memory-utilization 0.85`**.
+- **`--max-model-len 131072`**, **`--max-num-seqs 4`** (35B default),
+  **`-tp 2`**, **`--gpu-memory-utilization 0.85`**.
 - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`). The AITER BF16 LDS-fit
   patch (`patches/aiter/unified-attention-bf16-kv.patch`) caps `TILE_SIZE` and
   `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by MTP token
