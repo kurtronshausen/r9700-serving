@@ -42,6 +42,9 @@ network alias instead of the host port.
 ## Configuration
 
 Build versions are pinned in `.env` (untracked; copy `.env.example` to create it).
+Host-specific settings also live there: `USER_UID`/`USER_GID` (the user the
+container runs as, keeping host cache dirs user-owned) and `RENDER_GID` (the
+host render group gid for `/dev/dri` access — check with `getent group render`).
 
 | component    | version |
 |:-------------|:--------|

@@ -258,7 +258,7 @@ def gen_long_context(base_len):
                      f"and validating the approach on additional benchmarks.")
     return "\n\n".join(parts)
 
-context = gen_long_context(240)
+context = gen_long_context(90)
 print(f"Context: {len(context)} chars (~{len(context)//4} est tokens)", flush=True)
 
 for i in range(10):
