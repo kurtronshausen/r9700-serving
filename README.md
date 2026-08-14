@@ -98,6 +98,18 @@ final answer into `content`.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on 27B only; disabled on 35B, see "MTP workaround").
 
+### Runtime overlay: tolerate empty `tools` arrays
+
+Some clients send `{"tools": [], "tool_choice": "none"}` on chat completions,
+which upstream vLLM's `check_tool_usage` rejects with a 400 (it treats any empty
+tools array as malformed, even when `tool_choice` is `"none"`). A read-only
+overlay of `vllm/entrypoints/openai/chat_completion/protocol.py`
+(`patches/vllm/protocol.py`, pinned to `VLLM_REF` v0.27.1) is bind-mounted over
+the site-packages copy in `compose.yaml`. It treats `tools: []` as a no-tools
+request when `tool_choice` is `"none"`/omitted, while still rejecting genuinely
+invalid combos (`auto`/`required`/named tool_choice with empty tools). Refresh
+the overlay from the current vLLM source when bumping `VLLM_REF`.
+
 ### Runtime env knobs
 
 Non-standard environment set across `compose.yaml`, `Dockerfile.fullbuild`,
