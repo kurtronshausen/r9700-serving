@@ -98,17 +98,29 @@ final answer into `content`.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on 27B only; disabled on 35B, see "MTP workaround").
 
-### Runtime overlay: tolerate empty `tools` arrays
+### Runtime overlays (bind-mounted source fixes)
 
-Some clients send `{"tools": [], "tool_choice": "none"}` on chat completions,
-which upstream vLLM's `check_tool_usage` rejects with a 400 (it treats any empty
-tools array as malformed, even when `tool_choice` is `"none"`). A read-only
-overlay of `vllm/entrypoints/openai/chat_completion/protocol.py`
-(`patches/vllm/protocol.py`, pinned to `VLLM_REF` v0.27.1) is bind-mounted over
-the site-packages copy in `compose.yaml`. It treats `tools: []` as a no-tools
-request when `tool_choice` is `"none"`/omitted, while still rejecting genuinely
-invalid combos (`auto`/`required`/named tool_choice with empty tools). Refresh
-the overlay from the current vLLM source when bumping `VLLM_REF`.
+Version-locked patches applied at runtime by read-only bind-mounts in
+`compose.yaml` (no image rebuild needed). Refresh the overlay files when bumping
+the pinned dependency.
+
+- **Tolerate empty `tools` arrays** (`patches/vllm/protocol.py`, pinned to
+  `VLLM_REF` v0.27.1): some clients send `{"tools": [], "tool_choice": "none"}`
+  on chat completions, which upstream vLLM's `check_tool_usage` rejects with a
+  400 (it treats any empty tools array as malformed, even when `tool_choice` is
+  `"none"`). The overlay of
+  `vllm/entrypoints/openai/chat_completion/protocol.py` treats `tools: []` as a
+  no-tools request when `tool_choice` is `"none"`/omitted, while still rejecting
+  genuinely invalid combos (`auto`/`required`/named tool_choice with empty
+  tools).
+- **Fix aiter op-namespace teardown crash** (`patches/aiter/torch_guard.py`,
+  pinned to `AITER_REF` v0.1.19.post2): aiter registers ops with a
+  namespace-prefixed name (`aiter::{opname}`) on a `Library("aiter")`, so torch
+  records `aiter::aiter::{opname}` in its bookkeeping. At interpreter exit
+  torch's `_clear_torch_ops_cache` does `qualname.split("::")` expecting exactly
+  two parts and crashes with `ValueError: too many values to unpack`. The
+  overlay of `aiter/jit/utils/torch_guard.py` passes the bare op name, which
+  `Library("aiter")` namespaces itself; `torch.ops.aiter.*` still resolves.
 
 ### Runtime env knobs
 
