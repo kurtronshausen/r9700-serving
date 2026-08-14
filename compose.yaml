@@ -111,7 +111,7 @@ services:
       --host 0.0.0.0
       --port 8180
       --dtype auto
-      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-1}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-4}
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-fp8}
       -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN

@@ -96,8 +96,8 @@ and the final answer into `content`.
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len 131072`**, **`-tp 2`**,
-  **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** is `4` on the
-  35B profile and `1` (default) on the dense profiles.
+  **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
+  across all profiles.
 - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`). The AITER BF16 LDS-fit
   patch (`patches/aiter/unified-attention-bf16-kv.patch`) caps `TILE_SIZE` and
   `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by MTP token
