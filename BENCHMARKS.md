@@ -6,40 +6,38 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 ## Setup
 
 `--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
-0.8`, `-tp 2`, `GPU_MAX_HW_QUEUES=1`. Single-request numbers are invariant to
+0.85`, `-tp 2`, `GPU_MAX_HW_QUEUES=1`. Single-request numbers are invariant to
 `--max-num-seqs`; the server runs at `--max-num-seqs 1` because concurrency
 loses to serial on this stack (see Concurrency). The froggeric v21.3 chat
 template (`chat-templates/qwen36.jinja`) is wired via `--chat-template`
 (reasoning → `reasoning`, answer → `content`).
 
-## Current (2026-08-11, vLLM 0.27.0, torch 2.13, triton 3.8.0, bf16 KV + tuned MoE, MTP off on 35B)
+## Current (2026-08-12, vLLM 0.27.0 build, torch 2.13, triton 3.8.0, bf16 KV + tuned MoE + tuned dense, MTP off on 35B)
+
+> **Note on versions:** the tables below were measured on the vLLM 0.27.0
+> build. The current source-build pin is **0.27.1** (see README config table);
+> the 0.27.0 → 0.27.1 bump is a packaging/pin update and these numbers are
+> expected to carry over unchanged.
 
 **BF16 KV** restored via AITER LDS-fit patch + **tuned fused MOE configs**
-(`fused_moe_configs/E=256,N=512,json`) for Triton 3.8.0. MTP disabled on 35B-A3B
-per vLLM #47087 workaround; 27B retains MTP4.
+(`fused_moe_configs/E=256,N=256,...json`) for Triton 3.8.0. MTP disabled on
+35B-A3B per vLLM #47087 workaround; 27B retains MTP4. Both models also carry
+the tuned dense w8a8 block-FP8 GEMM configs (see README "Key tuning decisions").
 
 | model | test | t/s |
 |:------|-----:|----:|
-| 35B-A3B | pp2048 | ~10260 |
-| 35B-A3B | tg32 | 86.8 |
-| 35B-A3B | tg128 | 86.7 |
-| 27B | pp2048 | ~2924 |
-| 27B | tg32 | ~87.4 |
-| 27B | tg128 | ~76.3 |
-
-Stock MoE autotuning (no tuned `fused_moe_configs`). Tuned MoE configs gave
-mixed results on 3.8.0 (wins at 0-32K, regression at 64-128K context) — see
-README "Dead ends". The bf16 KV AITER patch was removed after triton 3.8.0
-produced garbage output.
-
-| model                     |   test |       t/s |
-|:--------------------------|-------:|----------:|
-| Qwen/Qwen3.6-27B-FP8      | pp2048 | 2924.03 ± 19.96 |
-| Qwen/Qwen3.6-27B-FP8      |   tg32 |    87.42 ± 0.09 |
-| Qwen/Qwen3.6-27B-FP8      |  tg128 |    76.34 ± 6.50 |
-| Qwen/Qwen3.6-35B-A3B-FP8  | pp2048 |  9380.89 ± 176.12 |
-| Qwen/Qwen3.6-35B-A3B-FP8  |   tg32 |   185.46 ± 13.16 |
-| Qwen/Qwen3.6-35B-A3B-FP8  |  tg128 |   155.70 ± 23.08 |
+| 35B-A3B BF16+MoETuned+MtPOff | pp2048 | ~8788 |
+| 35B-A3B BF16+MoETuned+MtPOff | tg32 | ~87.8 |
+| 35B-A3B BF16+MoETuned+MtPOff | tg128 | ~87.1 |
+| 35B-A3B +DenseTuned (same)   | pp2048 | ~8510 |
+| 35B-A3B +DenseTuned (same)   | tg32 | **91.0** |
+| 35B-A3B +DenseTuned (same)   | tg128 | **91.3** |
+| 27B BF16+MTP4                | pp2048 | ~2471 |
+| 27B BF16+MTP4                | tg32 | ~80.6 |
+| 27B BF16+MTP4                | tg128 | ~63.7 |
+| 27B BF16+MTP4+DenseTuned     | pp2048 | ~2500 |
+| 27B BF16+MTP4+DenseTuned     | tg32 | **90.8** |
+| 27B BF16+MTP4+DenseTuned     | tg128 | ~69 |
 
 ### v0.26 → v0.27 upgrade
 
@@ -71,7 +69,8 @@ decode throughput over the no-MTP baseline.
 ## MTP impact (35B-A3B)
 
 Enabling MTP roughly doubles decode speed. Draft-token count was tuned on the
-35B-A3B; both models now run MTP4.
+35B-A3B. The table below is MTP3-era; MTP is currently **disabled on 35B-A3B**
+per vLLM #47087 (see README "MTP bug") and 27B runs MTP4.
 
 | MTP | pp2048 (t/s) | tg32 (t/s) | acceptance |
 |:----|-------------:|-----------:|-----------:|
@@ -101,10 +100,9 @@ Two R9700s on separate PCIe 5.0 x8 root ports, P2P disabled
 ## Concurrency
 
 > **Note:** The depth sweep and concurrency benchmarks referenced below were
-> run with **bf16 KV** and **tuned fused_moe configs** as part of the MoE tuning
-> A/B test. The running config uses fp8 KV + stock MoE autotuning. The concurrency
-> *behavior* (c1 vs c2, depth scaling) is expected to be independent of these
-> tuning differences and still valid.
+> run with **bf16 KV** and **tuned fused_moe configs** — the same stack as the
+> current running config. The concurrency *behavior* (c1 vs c2, depth scaling)
+> is independent of the later tuned-dense GEMM configs and still valid.
 
 35B-A3B. The table below is the original MTP3-era data; current MTP4 findings
 follow. `total` = aggregate across all concurrent requests, `req` = per
@@ -207,3 +205,16 @@ MTP4 baseline) erodes once MTP is removed — without draft tokens, decode speed
 is capped by the MoE kernel throughput regardless of output length. KV cache
 loading dominates prefill at depth, and decode falls with depth as the attention
 over the cached prefix grows (71 t/s at d128K vs 87 at d0 = −18%).
+
+## Depth sweep (35B-A3B, MTP off, tuned dense vs stock, 2026-08-12)
+
+Deep-context decode is dominated by attention over the cached KV, so the GEMM
+tuning benefit narrows with depth. Same-boot A/B (bf16 KV, tuned MoE, thinking
+off); the `stock` column is the table above (no tuned dense configs).
+
+| depth | stock tg32 | +tuned dense tg32 | uplift |
+|------:|-----------:|------------------:|:------|
+| 0     | 86.8 | **90.3** | +4% |
+| 4096  | 86.8 | **91.4** | +5% |
+| 65536 | 78.2 | **79.1** | +1% |
+| 128000| 71.4 | **72.3** | +1% |

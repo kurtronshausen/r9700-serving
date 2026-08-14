@@ -14,7 +14,9 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just check` | validate the compose config for the selected model profile |
 | `just build` | build the Docker image |
 | `just rebuild` | force-rebuild (no cache) |
-| `just up` | start the vLLM server (runs `check`, starts container, waits for readiness, runs warmup) |
+| `just up` | start the vLLM server (runs `check`, `ensure-cache-dirs`, `prewarm`, starts container, waits for readiness, runs warmup) |
+| `just prewarm` | build shared aiter JIT kernels in one throwaway container (runs automatically before every `up`) |
+| `just bench` | benchmark the selected model via `llama-benchy` (pp2048, tg32+128) |
 | `just logs` | follow container logs (`docker compose logs -f`) |
 | `just down` | stop and remove the container |
 | `just exec <cmd>` | run a command inside the running container (e.g. `just exec bash`) |

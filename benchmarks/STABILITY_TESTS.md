@@ -77,7 +77,8 @@ print("Done.")
 PYEOF'
 ```
 
-**Baseline results** (qwen3.6-27b, 2× R9700, vLLM 0.27.0):
+**Baseline results** (qwen3.6-27b, 2× R9700, vLLM 0.27.0 build; source pin
+is now 0.27.1):
 - Completed: **400 / 400**, Errors: **0**
 - Avg words/gen: ~259, Min: 33, Max: 1451
 
@@ -188,7 +189,8 @@ print("Done.")
 PYEOF'
 ```
 
-**Baseline results** (qwen3.6-27b, 2× R9700, vLLM 0.27.0):
+**Baseline results** (qwen3.6-27b, 2× R9700, vLLM 0.27.0 build; source pin
+is now 0.27.1):
 
 | # | Time | Input Tok | Gen Tok | Words | Vocab Richness |
 |---|------|-----------|---------|-------|----------------|
@@ -215,10 +217,132 @@ Stresses the reasoning path with `enable_thinking: true`. Each request sends a
 thinking actually happens, output stays coherent, and nothing crashes.
 
 ```sh
-just exec python3 - < /tmp/opencode/stress_32k_thinking.py
+just exec python3 - <<'PYEOF'
+import requests, time, sys, random
+
+results = []
+
+topics = [
+    "machine learning optimization and gradient descent algorithms",
+    "quantum computing error correction and fault tolerance systems",
+    "distributed systems consistency models and consensus protocols",
+    "climate change modeling and carbon cycle dynamics in ocean-atmosphere systems",
+    "neuroscience of visual perception and cortical processing pathways",
+    "cryptocurrency consensus mechanisms and proof of stake validation",
+    "protein folding predictions and molecular dynamics simulation methods",
+    "natural language processing transformer architectures and attention mechanisms",
+    "renewable energy grid management and battery storage optimization",
+    "spatial statistics and geospatial clustering algorithms for urban planning",
+    "reinforcement learning for robotics control and decision making",
+    "computational biology and gene regulatory network inference",
+    "autonomous vehicle perception and sensor fusion",
+    "federated learning privacy and differential privacy mechanisms",
+    "graph neural networks for social network analysis",
+    "large language model alignment and safety evaluation",
+    "computer vision object detection and image segmentation",
+    "time series forecasting and anomaly detection",
+    "bayesian optimization for hyperparameter tuning",
+    "cryptographic protocols and zero-knowledge proofs"
+]
+
+def gen_long_context(base_len):
+    parts = []
+    for i in range(base_len):
+        parts.append(f"Section {i}: Analysis of {random.choice(topics)}. "
+                     f"This comprehensive review examines recent developments and findings. "
+                     f"The research methodology employed quantitative analysis across multiple datasets. "
+                     f"Key results indicate significant correlations between variables. "
+                     f"The implications for future work are substantial and warrant careful consideration. "
+                     f"Additional experiments confirmed the initial findings with statistical significance. "
+                     f"Future directions include expanding the dataset, improving model robustness, "
+                     f"and validating the approach on additional benchmarks.")
+    return "\n\n".join(parts)
+
+context = gen_long_context(240)
+print(f"Context: {len(context)} chars (~{len(context)//4} est tokens)", flush=True)
+
+for i in range(10):
+    print(f"\n--- Request {i+1}/10 ---", flush=True)
+    prompt = f"""Analyze the following research compilation in extreme detail. Provide an exhaustive, multi-section analysis:
+
+{context}
+
+Provide your analysis with these sections, each with multiple subsections:
+1. Executive Summary
+2. Key Themes and Patterns
+3. Methodology Assessment
+4. Notable Findings and Results
+5. Comparative Analysis Across Topics
+6. Gaps and Future Directions
+7. Conclusion and Recommendations
+
+For EACH section write at least 3 substantial paragraphs with concrete details, cross-references between topics, and specific quantitative observations. Be thorough — cover every topic in the compilation."""
+
+    body = {
+        "model": "qwen3.6-35b-a3b",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 32768,
+        "temperature": 0.5,
+        "chat_template_kwargs": {"enable_thinking": True}
+    }
+
+    start = time.time()
+    resp = requests.post("http://localhost:8180/v1/chat/completions", json=body, timeout=600)
+    elapsed = time.time() - start
+
+    status = resp.status_code
+    if status != 200:
+        print(f"ERROR: HTTP {status}: {resp.text[:150]}")
+        continue
+
+    data = resp.json()
+    message = data["choices"][0]["message"]
+    content = message.get("content", "")
+    reasoning = message.get("reasoning", "")
+    usage = data.get("usage", {})
+
+    input_tokens = usage.get("prompt_tokens", "?")
+    output_tokens = usage.get("completion_tokens", "?")
+    words = len(content.split())
+    unique_words = len(set(content.lower().split()))
+    vocab_rich = (unique_words / max(words, 1)) * 100
+
+    results.append({
+        "input": input_tokens,
+        "output": output_tokens,
+        "words": words,
+        "reasoning_chars": len(reasoning),
+        "vocab_pct": vocab_rich,
+        "elapsed": elapsed
+    })
+
+    print(f"  Time: {elapsed:.1f}s | Prompt: {input_tokens} | Gen: {output_tokens} | Words: {words} | Vocab: {vocab_rich:.1f}% | Reasoning chars: {len(reasoning)}")
+    print(f"  Thinking present: {'yes' if reasoning else 'NO'}")
+    print(f"  Start: {content[:60].strip()}")
+    print(f"  End: ...{content[-60:].strip()}")
+
+print("\n=== RESULTS ===")
+ok = [r for r in results if r["output"] != "?"]
+print(f"Completed: {len(ok)}/10")
+if ok:
+    avg_input = sum(r["input"] for r in ok) / len(ok)
+    avg_gen = sum(r["output"] for r in ok) / len(ok)
+    avg_time = sum(r["elapsed"] for r in ok) / len(ok)
+    avg_vocab = sum(r["vocab_pct"] for r in ok) / len(ok)
+    thinking = sum(1 for r in ok if r["reasoning_chars"] > 0)
+    print(f"Avg input tokens: {avg_input:.0f}")
+    print(f"Avg gen tokens: {avg_gen:.0f}")
+    print(f"Avg time: {avg_time:.1f}s")
+    print(f"Avg vocab richness: {avg_vocab:.1f}%")
+    print(f"Thinking enabled: {thinking}/10")
+errors = 10 - len(ok)
+print(f"Errors: {errors}/10")
+print("Done.")
+PYEOF
 ```
 
-**Baseline results** (qwen3.6-35b-a3b, 2× R9700, vLLM 0.27.0):
+**Baseline results** (qwen3.6-35b-a3b, 2× R9700, vLLM 0.27.0 build; source pin
+is now 0.27.1):
 
 | metric | result |
 |--------|--------|

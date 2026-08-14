@@ -64,7 +64,8 @@ override inline with `MODEL_PROFILE=qwen3.6-35b-a3b just up`.
 Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
 - `env/aiter-unified-attention.env` — enables AITER unified attention only
-- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP disabled, tool use)
+- `env/qwen3.6.env.common` — shared qwen3.6 config (KV cache dtype, MTP spec-decode, tool choice)
+- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP disabled)
 - `env/qwen3.6-27b.env` — dense 27B model config
 
 ### Chat template
@@ -178,8 +179,9 @@ the 35B model only. The 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
 ## Performance
 
 Measured on 2× R9700, BF16 KV + tuned MOE config, single request, vLLM 0.27.0,
-torch 2.13, triton 3.8.0+git (ROCm 7.14.0). MTP4 is enabled for the 27B model;
-disabled for 35B-A3B (see "MTP bug" above).
+torch 2.13, triton 3.8.0+git (ROCm 7.14.0). The 0.27.0 → 0.27.1 bump is a
+packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
+MTP4 is enabled for the 27B model; disabled for 35B-A3B (see "MTP bug" above).
 
 | model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------------|:-------------------|-----------:|---------:|----------:|
