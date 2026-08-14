@@ -39,7 +39,6 @@ date: 2026-05-22 20:06:26 | latency mode: api
       - /dev/dri:/dev/dri
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface:Z
-      - ./chat-templates/:/app/chat-templates:Z
       - ${HOME}/.cache/vllm:/root/.cache/vllm:Z
     networks:
       default:

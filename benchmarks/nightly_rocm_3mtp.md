@@ -58,7 +58,6 @@ date: 2026-05-22 18:44:42 | latency mode: api
           - llm-backend
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface:Z
-      - ./chat-templates/:/app/chat-templates:Z
       - ${HOME}/.cache/vllm:/root/.cache/vllm:Z
 
     environment:
@@ -95,7 +94,6 @@ date: 2026-05-22 18:44:42 | latency mode: api
       Qwen/Qwen3.6-27B-FP8
       --tokenizer Qwen/Qwen3.6-27B
       --served-model-name qwen3.6-27b
-      --chat-template /app/chat-templates/qwen36.jinja
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
       --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
       --max-model-len 128000
