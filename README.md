@@ -121,6 +121,9 @@ the pinned dependency.
   two parts and crashes with `ValueError: too many values to unpack`. The
   overlay of `aiter/jit/utils/torch_guard.py` passes the bare op name, which
   `Library("aiter")` namespaces itself; `torch.ops.aiter.*` still resolves.
+  Upstream fixed the same bug in ROCm/aiter PR #4593 (merged 2026-08-06, see
+  "aiter op-namespace teardown crash" below); it has not shipped in a release
+  yet, so this overlay stays until `AITER_REF` bumps past the fix.
 
 ### Runtime env knobs
 
@@ -212,8 +215,19 @@ interpreter exit torch's `_clear_torch_ops_cache` does
 `ValueError: too many values to unpack`. This is an aiter bug (incorrect torch
 `Library.define` usage — vLLM itself registers ops with bare names, e.g.
 `vllm/utils/torch_utils.py:936`); the runtime symptom is benign noise during
-interpreter shutdown in the throwaway prewarm container, but it is still live
-upstream (e.g. commit `6e2052b0`). Not yet filed upstream.
+interpreter shutdown in the throwaway prewarm container.
+
+**Upstream status**: fixed in [ROCm/aiter PR #4593](https://github.com/ROCm/aiter/pull/4593)
+("fix(torch_guard): drop redundant aiter:: prefix from define schema for torch
+2.13"), merged into `main` as commit `86cc388` on 2026-08-06. The upstream
+commit independently confirms this diagnosis: torch ≥2.13 stores the doubled
+`aiter::aiter::<op>` in `_op_defs` (2.12 stripped it), and the shutdown
+`qualname.split("::")` raises `too many values to unpack`. The upstream patch
+matches our overlay byte-for-byte (bare op name to `define`/`impl`). The fix is
+**not yet in any release** — the newest tag `v0.1.19.post2` (2026-08-05)
+predates the merge by one day. Expect it in the next `v0.1.19.post3`/`v0.1.20`;
+our overlay stays until `AITER_REF` is bumped past the fix (then drop it and
+clear caches per the cache-clearing notes).
 
 **Impact**: cosmetic only — a traceback at process exit in the prewarm and any
 short-lived aiter process. No effect on the running server.

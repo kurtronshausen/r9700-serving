@@ -7,7 +7,10 @@
 # `Library("aiter")`, so torch records the qualname as `aiter::aiter::{opname}`.
 # torch's `_clear_torch_ops_cache` then crashes at interpreter exit on
 # `qualname.split("::")`. Fix: pass the bare op name; `Library("aiter")` already
-# applies the namespace. Refresh this file when bumping AITER_REF.
+# applies the namespace. Fixed upstream by ROCm/aiter PR #4593 (merged
+# 2026-08-06) but not yet in any release; this overlay becomes redundant once
+# AITER_REF is bumped past commit 86cc388. Refresh this file when bumping
+# AITER_REF.
 
 import importlib
 import types
