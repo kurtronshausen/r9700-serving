@@ -356,7 +356,7 @@ is now 0.27.1):
 
 - **Thinking confirmed:** every request produced a `reasoning` field (thinking
   enabled via `"chat_template_kwargs":{"enable_thinking":true}`), so the
-  froggeric qwen3 template partitions thinking from the final answer correctly.
+  model's bundled qwen3 template partitions thinking from the final answer correctly.
 - **Note on the 32k budget:** the model never hit 32768 output tokens — it
   emitted EOS at ~5.6k avg (max ~7k) once responses reached a coherent stopping
   point. This validates thinking-path stability, but did **not** exercise the

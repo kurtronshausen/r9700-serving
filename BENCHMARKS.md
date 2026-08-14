@@ -8,9 +8,8 @@ All benchmarks use `llama-benchy` (0.4.0, via `uvx`) against
 `--max-num-batched-tokens 4096`, `--max-num-seqs 1`, `--gpu-memory-utilization
 0.85`, `-tp 2`, `GPU_MAX_HW_QUEUES=1`. Single-request numbers are invariant to
 `--max-num-seqs`; the server runs at `--max-num-seqs 1` because concurrency
-loses to serial on this stack (see Concurrency). The froggeric v21.3 chat
-template (`chat-templates/qwen36.jinja`) is wired via `--chat-template`
-(reasoning → `reasoning`, answer → `content`).
+loses to serial on this stack (see Concurrency). The model's bundled default
+chat template is used (reasoning → `reasoning`, answer → `content`).
 
 ## Current (2026-08-12, vLLM 0.27.0 build, torch 2.13, triton 3.8.0, bf16 KV + tuned MoE + tuned dense, MTP off on 35B)
 

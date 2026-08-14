@@ -4,11 +4,11 @@ set positional-arguments
 # `just --set runtime podman <recipe>` or `RUNTIME=podman just <recipe>`.
 runtime := env_var_or_default('RUNTIME', 'docker')
 
-# Model profile: "qwen3.6-35b-a3b" (default) or "qwen3.6-27b".
+# Model profile: "qwen3.8-27b" (default), "qwen3.6-27b", or "qwen3.6-35b-a3b".
 # Selects env/${model}.env for model-specific server arguments.
 # Override with `just --set model qwen3.6-27b <recipe>` or
 # `MODEL_PROFILE=qwen3.6-27b just <recipe>`.
-model := env_var_or_default('MODEL_PROFILE', 'qwen3.6-35b-a3b')
+model := env_var_or_default('MODEL_PROFILE', 'qwen3.8-27b')
 
 # Exported so compose can resolve the `env_file:` path for the model profile.
 export MODEL_PROFILE := model
