@@ -194,6 +194,34 @@ the 35B model only. The 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
 `--speculative-config`. The 27B profile inherits `VLLM_SPEC_DECODE` from
 `qwen3.6.env.common` and retains MTP4.
 
+### aiter op-namespace teardown crash
+
+Upstream aiter's `torch_compile_guard` registers custom ops by passing a
+namespace-prefixed name to `torch.library.Library("aiter")`:
+
+```python
+op_schema = f"aiter::{loadName}" + schema
+aiter_lib.define(op_schema, tags=tags)
+aiter_lib.impl(f"aiter::{loadName}", ...)
+```
+
+torch's `Library` wrapper already prepends its namespace, so its bookkeeping
+records the qualname as `aiter::aiter::{opname}` (double-namespaced). At
+interpreter exit torch's `_clear_torch_ops_cache` does
+`qualname.split("::")` expecting exactly two parts and crashes with
+`ValueError: too many values to unpack`. This is an aiter bug (incorrect torch
+`Library.define` usage — vLLM itself registers ops with bare names, e.g.
+`vllm/utils/torch_utils.py:936`); the runtime symptom is benign noise during
+interpreter shutdown in the throwaway prewarm container, but it is still live
+upstream (e.g. commit `6e2052b0`). Not yet filed upstream.
+
+**Impact**: cosmetic only — a traceback at process exit in the prewarm and any
+short-lived aiter process. No effect on the running server.
+
+**Workaround**: `patches/aiter/torch_guard.py` (see "Runtime overlays" above)
+passes the bare op name to `define`/`impl`, which `Library("aiter")` namespaces
+itself; `torch.ops.aiter.*` still resolves.
+
 ## Dead ends
 
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
