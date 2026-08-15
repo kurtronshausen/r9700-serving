@@ -79,9 +79,25 @@ Runtime environment is split across files:
 
 ### Chat template
 
-Each model's bundled default chat template is used (no custom template is
-mounted); Qwen's chat templates partition thinking into the `reasoning` field
-and the final answer into `content`.
+All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
+(`chat-templates/qwen.jinja`, pinned to **v22** — `qwen3.8-froggeric-v22`,
+fetched from the repo's `main`). It is applied to every model via
+`--chat-template` in `compose.yaml`, overriding each model's bundled template.
+The template fixes rendering bugs, KV-cache invalidation, token waste, and
+agentic stalling in the official Qwen templates, and adds tool-error retry
+warnings plus optional `tool_call_format="json"` / reasoning-effort steering
+(`reasoning_effort`) kwargs. Thinking is partitioned into the `reasoning` field
+and the final answer into `content`; `--reasoning-parser qwen3` (see below) is
+required for the split to work.
+
+Refresh the overlay from upstream when a newer version ships:
+
+```sh
+curl -L -o chat-templates/qwen.jinja \
+  https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja
+```
+
+[froggeric's Qwen-Fixed-Chat-Templates]: https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 
 ### Non-standard vLLM flags
 
@@ -263,7 +279,7 @@ torch 2.13, triton 3.8.0+git (ROCm 7.14.0). The 0.27.0 → 0.27.1 bump is a
 packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
 MTP4 is enabled for Qwen3.6-27B, MTP3 for Qwen3.8-27B; disabled for 35B-A3B
 (see "MTP bug" above and "Key tuning decisions"). The Qwen3.8-27B row below was
-measured with the same stack (BF16 KV + tuned dense, MTP3, bundled chat
+measured with the same stack (BF16 KV + tuned dense, MTP3, froggeric chat
 template, thinking off).
 
 | model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |

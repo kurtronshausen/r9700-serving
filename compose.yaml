@@ -1,4 +1,5 @@
 x-vllm-full-cache-volumes: &vllm_full_cache_volumes
+  - ./chat-templates/:/app/chat-templates
   - ./fused_moe_configs/:/app/fused_moe_configs
   - ./tools/tune_fused_moe.py:/app/tune_fused_moe.py
   - ./fp8_configs/:/app/fp8_configs
@@ -102,6 +103,7 @@ services:
       ${VLLM_MODEL_REVISION:+--revision "${VLLM_MODEL_REVISION}"}
       --served-model-name ${VLLM_SERVED_NAME:?set in env/$MODEL_PROFILE.env}
       --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
+      --chat-template /app/chat-templates/qwen.jinja
       ${VLLM_TOOL_CHOICE:-}
       --max-model-len ${VLLM_MAX_MODEL_LEN:-131072}
       --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
