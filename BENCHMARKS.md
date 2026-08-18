@@ -217,3 +217,27 @@ off); the `stock` column is the table above (no tuned dense configs).
 | 4096  | 86.8 | **91.4** | +5% |
 | 65536 | 78.2 | **79.1** | +1% |
 | 128000| 71.4 | **72.3** | +1% |
+
+## Depth sweep (Qwen3.8-27B-FP8, fp8 KV, MTP3, 2026-08-18)
+
+Current default stack: **fp8 KV** (`VLLM_KV_CACHE_DTYPE=fp8`), MTP3 spec-decode,
+`--max-model-len 262144`. Full-context prefill sweep (no prefix caching: each
+run prefills `depth + 2048`).
+
+| depth | ctx_pp (t/s) | ctx_tg32 (t/s) | e2e TTFT (s) |
+|------:|-------------:|---------------:|-------------:|
+| 4096  |     2698 |         48.7 |           2.3 |
+| 8192  |     2754 |         51.3 |           3.7 |
+| 16384 |     2699 |         51.3 |           6.8 |
+| 32768 |     2588 |         46.5 |          13.5 |
+| 65536 |     2364 |         59.8 |          28.6 |
+| 128000|     2032 |         40.3 |          64.0 |
+
+Decode is flat ~47–51 t/s from d4K–d16K (the d64K point is 2-run noise),
+falls to 40.3 t/s at d128K, and full-context prefill degrades 2698 → 2032 t/s
+(−25%) with e2e TTFT scaling linearly to 64 s at d128K. fp8 KV halves the KV
+bytes moved per attention step — which deep-context decode is bound by — so
+decode at depth holds up against the 57.6 t/s d0 bf16-KV baseline
+([`08_14_qwen3.8-27b_bf16_mtp4_bench.md`](benchmarks/08_14_qwen3.8-27b_bf16_mtp4_bench.md)).
+See [`08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md)
+for full tables and observations.

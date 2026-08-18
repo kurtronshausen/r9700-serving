@@ -111,13 +111,18 @@ curl -L -o chat-templates/qwen.jinja \
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
-- **`--max-model-len 131072`**, **`-tp 2`**,
+- **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
+  `262144` for 256K contexts), **`-tp 2`**,
   **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
   across all profiles.
-- **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`). The AITER BF16 LDS-fit
-  patch (`patches/aiter/unified-attention-bf16-kv.patch`) caps `TILE_SIZE` and
-  `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by MTP token
-  loops (see "MTP bug" below), not the patch — BF16 is now the default.
+- **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
+  the default across all Qwen profiles — it halves KV-cache memory (enabling
+  the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
+  deep-context decode up (see depth sweep below). For BF16 KV, set
+  `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
+  (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
+  and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
+  MTP token loops (see "MTP bug" below), not the patch.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on the dense profiles; disabled on 35B, see "MTP workaround").
 
@@ -187,8 +192,13 @@ Key tuning decisions:
 - **NCCL channels pinned to 4** (`NCCL_MIN_NCHANNELS=NCCL_MAX_NCHANNELS=4`):
   the bandwidth sweet spot for two GPUs on separate PCIe 5.0 x8 root ports with
   P2P disabled.
-- **BF16 KV cache**: restored via an AITER LDS-fit patch. Prior "garbage" output
-  was caused by MTP token loops, not the patch. BF16 at ~88 t/s outperforms fp8.
+- **fp8 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=fp8`): halves
+  KV-cache memory (enables 256K contexts on Qwen3.8-27B) and keeps
+  deep-context decode up, since decode at depth is bound by the K/V bytes
+  moved per attention step (see depth sweep below). BF16 KV (via the AITER
+  LDS-fit patch) outperformed fp8 on 35B-A3B at shallow context (~88 t/s) and
+  remains the option when context length is not the constraint; the prior
+  "garbage" output was MTP token loops, not the KV dtype.
 - **Tuned dense w8a8 block-FP8 configs** (`fp8_configs/N=*,K=*,device_name=AMD_Radeon_R9700,...json`):
   the 5 per-GPU weight shapes for both 35B-A3B and 27B (TP=2) are now tuned for the
   R9700 via `tools/tune_fp8_dense.py`. Sweeps 576 Triton tile configurations per shape
@@ -274,13 +284,14 @@ itself; `torch.ops.aiter.*` still resolves.
 
 ## Performance
 
-Measured on 2× R9700, BF16 KV + tuned MOE config, single request, vLLM 0.27.0,
+Measured on 2× R9700, tuned MOE/dense configs, single request, vLLM 0.27.0,
 torch 2.13, triton 3.8.0+git (ROCm 7.14.0). The 0.27.0 → 0.27.1 bump is a
 packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
-MTP4 is enabled for Qwen3.6-27B, MTP3 for Qwen3.8-27B; disabled for 35B-A3B
-(see "MTP bug" above and "Key tuning decisions"). The Qwen3.8-27B row below was
-measured with the same stack (BF16 KV + tuned dense, MTP3, froggeric chat
-template, thinking off).
+KV dtype per row is as labeled; the **current default stack is fp8 KV**
+(`VLLM_KV_CACHE_DTYPE=fp8`). MTP4 is enabled for Qwen3.6-27B, MTP3 for
+Qwen3.8-27B; disabled for 35B-A3B (see "MTP bug" above and "Key tuning
+decisions"). The Qwen3.8-27B row below was measured with BF16 KV + tuned
+dense, MTP3, froggeric chat template, thinking off.
 
 | model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------------|:-------------------|-----------:|---------:|----------:|
@@ -310,6 +321,26 @@ off):
 | 4096  | 86.8 | **91.4** | +5% |
 | 65536 | 78.2 | **79.1** | +1% |
 | 128000| 71.4 | **72.3** | +1% |
+
+### Depth sweep (Qwen3.8-27B-FP8, fp8 KV, MTP3, 2026-08-18)
+
+Current default stack (fp8 KV + MTP3 + 256K max-model-len), full-context
+prefill at depth:
+
+| depth | ctx_pp t/s | tg32 t/s | e2e TTFT (s) |
+|------:|-----------:|---------:|-------------:|
+| 4096  |     2698 |     48.7 |           2.3 |
+| 8192  |     2754 |     51.3 |           3.7 |
+| 16384 |     2699 |     51.3 |           6.8 |
+| 32768 |     2588 |     46.5 |          13.5 |
+| 65536 |     2364 |     59.8 |          28.6 |
+| 128000|     2032 |     40.3 |          64.0 |
+
+Decode is flat ~47–51 t/s to d16K and holds up against the 57.6 t/s d0
+baseline, with fp8 KV's halved K/V bytes offsetting the growing attention
+span; d128K decodes at 40.3 t/s (−20% vs d8K). Full-context prefill degrades
+−25% (2698 → 2032 t/s) and e2e TTFT scales linearly to 64 s at d128K. See
+[`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md).
 
 ### Long-context concurrency
 
