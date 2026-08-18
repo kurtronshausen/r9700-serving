@@ -37,6 +37,9 @@ the tuned dense w8a8 block-FP8 GEMM configs (see README "Key tuning decisions").
 | 27B BF16+MTP4+DenseTuned     | pp2048 | ~2500 |
 | 27B BF16+MTP4+DenseTuned     | tg32 | **90.8** |
 | 27B BF16+MTP4+DenseTuned     | tg128 | ~69 |
+| Qwen3.8-27B fp8-KV+MTP3+DenseTuned (default) | pp2048 | ~2633–2661 |
+| Qwen3.8-27B fp8-KV+MTP3+DenseTuned (default) | tg32 | **59.7** |
+| Qwen3.8-27B fp8-KV+MTP3+DenseTuned (default) | tg128 | **68.8** |
 
 ### v0.26 → v0.27 upgrade
 

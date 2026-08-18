@@ -172,10 +172,11 @@ only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 
 Key tuning decisions:
 - **MTP speculative decoding** (dense profiles): MTP4 on Qwen3.6-27B (~72%
-  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 57.6; MTP2
-  56.0, MTP1 45.6, MTP4 49.2, no-MTP 32.0) because its MTP head accepts drafts
-  poorly past position 3, so more drafts waste compute and fewer lose
-  throughput. MTP is **disabled on 35B-A3B** — see "Archived issues".
+  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 59.7 on the
+  current fp8-KV stack; bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4
+  49.2, no-MTP 32.0) because its MTP head accepts drafts poorly past position 3,
+  so more drafts waste compute and fewer lose throughput. MTP is **disabled on
+  35B-A3B** — see "Archived issues".
 - **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
   throughput regression on RDNA4 — one queue per process avoids kernel launch
   scheduling overhead.
@@ -243,8 +244,8 @@ packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
 KV dtype per row is as labeled; the **current default stack is fp8 KV**
 (`VLLM_KV_CACHE_DTYPE=fp8`). MTP4 is enabled for Qwen3.6-27B, MTP3 for
 Qwen3.8-27B; disabled for 35B-A3B (see "MTP concurrency bug" and "Archived
-issues"). The Qwen3.8-27B row below was measured with BF16 KV + tuned
-dense, MTP3, froggeric chat template, thinking off.
+issues"). The Qwen3.8-27B row below is the current default stack (fp8 KV + tuned
+dense, MTP3, 256K context, froggeric chat template, thinking off).
 
 | model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------------|:-------------------|-----------:|---------:|----------:|
@@ -257,7 +258,7 @@ dense, MTP3, froggeric chat template, thinking off.
 | Qwen3.6-35B-A3B-BF16+MoETuned+DenseTuned+MtPOff | MTP off, tuned dense | ~8510 |  **91.0** |  **91.3** |
 | Qwen3.6-27B-BF16+MTP4           | MTP4, bf16 KV       |    ~2471 |   ~80.6 |   ~63.7  |
 | Qwen3.6-27B-BF16+MTP4+DenseTuned | MTP4, bf16 KV, tuned dense | ~2500 |  **90.8** |   ~69  |
-| Qwen3.8-27B-FP8 (bf16 KV, MTP3, tuned dense) | MTP3, bf16 KV | ~2498–2547 | **57.6** | 52.1 |
+| Qwen3.8-27B-FP8 (fp8 KV, MTP3, tuned dense) | MTP3, fp8 KV | ~2633–2661 | **59.7** | **68.8** |
 
 Full methodology, depth sweeps, and tuning history in
 [`BENCHMARKS.md`](BENCHMARKS.md).
@@ -282,18 +283,19 @@ prefill at depth:
 
 | depth | ctx_pp t/s | tg32 t/s | e2e TTFT (s) |
 |------:|-----------:|---------:|-------------:|
-| 4096  |     2698 |     48.7 |           2.3 |
-| 8192  |     2754 |     51.3 |           3.7 |
-| 16384 |     2699 |     51.3 |           6.8 |
-| 32768 |     2588 |     46.5 |          13.5 |
-| 65536 |     2364 |     59.8 |          28.6 |
-| 128000|     2032 |     40.3 |          64.0 |
+| 4096  |     2827 |     55.2 |           2.2 |
+| 8192  |     2768 |     55.5 |           3.7 |
+| 16384 |     2703 |     59.6 |           6.8 |
+| 32768 |     2589 |     57.3 |          13.4 |
+| 65536 |     2373 |     51.8 |          28.5 |
+| 128000|     2038 |     46.5 |          63.8 |
 
-Decode is flat ~47–51 t/s to d16K and holds up against the 57.6 t/s d0
-baseline, with fp8 KV's halved K/V bytes offsetting the growing attention
-span; d128K decodes at 40.3 t/s (−20% vs d8K). Full-context prefill degrades
-−25% (2698 → 2032 t/s) and e2e TTFT scales linearly to 64 s at d128K. See
-[`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md).
+Decode holds ~55–60 t/s to d32K and falls to 46.5 t/s at d128K (−22% vs d8K),
+against the 59.7 t/s d0 baseline, with fp8 KV's halved K/V bytes offsetting
+the growing attention span. Full-context prefill degrades −28% (2827 → 2038
+t/s) and e2e TTFT scales linearly to 63.8 s at d128K. See
+[`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md)
+and the d0 reference [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md).
 
 ### Long-context concurrency
 
