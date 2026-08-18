@@ -69,7 +69,7 @@ decode throughput over the no-MTP baseline.
 
 Enabling MTP roughly doubles decode speed. Draft-token count was tuned on the
 35B-A3B. The table below is MTP3-era; MTP is currently **disabled on 35B-A3B**
-per vLLM #47087 (see README "MTP bug") and 27B runs MTP4.
+per vLLM #47087 (see README "Archived issues") and 27B runs MTP4.
 
 | MTP | pp2048 (t/s) | tg32 (t/s) | acceptance |
 |:----|-------------:|-----------:|-----------:|

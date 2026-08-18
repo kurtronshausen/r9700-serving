@@ -115,7 +115,7 @@ curl -L -o chat-templates/qwen.jinja \
   `262144` for 256K contexts), **`-tp 2`**,
   **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
   (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on the MTP profiles
-  to stay below the #35288 corruption threshold (see "MTP bug").
+  to stay below the #35288 corruption threshold (see "MTP concurrency bug").
 - **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
   the default across all Qwen profiles — it halves KV-cache memory (enabling
   the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
@@ -123,9 +123,9 @@ curl -L -o chat-templates/qwen.jinja \
   `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
   (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
   and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
-  MTP token loops (see "MTP bug" below), not the patch.
+  MTP token loops (see "Archived issues"), not the patch.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on the dense profiles; disabled on 35B, see "MTP workaround").
+  (MTP4 on the dense profiles; disabled on 35B, see "Archived issues").
 
 ### Runtime overlays (bind-mounted source fixes)
 
@@ -175,7 +175,7 @@ Key tuning decisions:
   acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 57.6; MTP2
   56.0, MTP1 45.6, MTP4 49.2, no-MTP 32.0) because its MTP head accepts drafts
   poorly past position 3, so more drafts waste compute and fewer lose
-  throughput. MTP is **disabled on 35B-A3B** — see "MTP bug" below.
+  throughput. MTP is **disabled on 35B-A3B** — see "Archived issues".
 - **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
   throughput regression on RDNA4 — one queue per process avoids kernel launch
   scheduling overhead.
@@ -203,71 +203,28 @@ Key tuning decisions:
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
 
-### MTP bug (35B) and MTP concurrency bug (dense)
+### MTP concurrency bug (dense profiles)
 
-vLLM's native MTP speculative decoding has two confirmed bugs that affect this
-stack:
+The one upstream bug currently affecting this stack:
+[#35288](https://github.com/vllm-project/vllm/issues/35288) — MTP spec-decode
+produces corrupted output when 4+ decode sequences share a batch (garbage
+header → repetition loop → `max_tokens`).
 
-| Issue | Summary | Scope |
-|:------|:--------|:------|
-| [vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087) | MTP token loops on Qwen3-MoE; output quality collapse mid-conversation | 35B-A3B |
-| [vllm-project/vllm#35288](https://github.com/vllm-project/vllm/issues/35288) | MTP produces corrupted output when 4+ decode sequences share a batch (garbage header → repetition loop → `max_tokens`) | dense 27B MTP profiles |
+**Workaround**: `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2`, so vLLM
+never forms a ≥4-sequence decode batch — concurrent decode stays below the
+corruption threshold regardless of incoming concurrency. Verified with the
+#35288 repro (4/6/8 concurrent requests → all coherent) and the 400-request
+stress test. Dense MTP stays enabled (MTP4 on Qwen3.6-27B, MTP3 on
+Qwen3.8-27B); 35B-A3B runs MTP disabled — see archived issues below.
 
-**35B**: MTP disabled. 35B-A3B throughput drops from ~185 tg32 (MTP4) to ~83
-tg32 (no MTP).
+### Archived issues
 
-**Dense 27B**: MTP works correctly at c1–3, but vLLM never forms a ≥4-sequence
-decode batch: `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2` (see "MTP
-workaround" below), so concurrent decode batches stay below the corruption
-threshold regardless of incoming concurrency. Verified with the #35288 repro
-(4/6/8 concurrent requests → all coherent) and the 400-request stress test.
+Resolved upstream or superseded; kept for reference.
 
-**Workaround**: the 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
-`--speculative-config`. The dense profiles override `VLLM_SPEC_DECODE` from
-`qwen3.6.env.common`: `qwen3.6-27b` inherits MTP4, `qwen3.8-27b` overrides to
-MTP3 (its MTP head accepts drafts poorly past position 3 — see "Key tuning
-decisions"). Because #35288 corrupts output when 4+ decode sequences share a
-batch, `qwen3.6.env.common` also sets `VLLM_MAX_NUM_SEQS=2`, capping concurrent
-sequences below the trigger for the MTP profiles.
-
-### aiter op-namespace teardown crash
-
-Upstream aiter's `torch_compile_guard` registers custom ops by passing a
-namespace-prefixed name to `torch.library.Library("aiter")`:
-
-```python
-op_schema = f"aiter::{loadName}" + schema
-aiter_lib.define(op_schema, tags=tags)
-aiter_lib.impl(f"aiter::{loadName}", ...)
-```
-
-torch's `Library` wrapper already prepends its namespace, so its bookkeeping
-records the qualname as `aiter::aiter::{opname}` (double-namespaced). At
-interpreter exit torch's `_clear_torch_ops_cache` does
-`qualname.split("::")` expecting exactly two parts and crashes with
-`ValueError: too many values to unpack`. This is an aiter bug (incorrect torch
-`Library.define` usage — vLLM itself registers ops with bare names, e.g.
-`vllm/utils/torch_utils.py:936`); the runtime symptom is benign noise during
-interpreter shutdown in the throwaway prewarm container.
-
-**Upstream status**: fixed in [ROCm/aiter PR #4593](https://github.com/ROCm/aiter/pull/4593)
-("fix(torch_guard): drop redundant aiter:: prefix from define schema for torch
-2.13"), merged into `main` as commit `86cc388` on 2026-08-06. The upstream
-commit independently confirms this diagnosis: torch ≥2.13 stores the doubled
-`aiter::aiter::<op>` in `_op_defs` (2.12 stripped it), and the shutdown
-`qualname.split("::")` raises `too many values to unpack`. The upstream patch
-matches our former overlay byte-for-byte (bare op name to `define`/`impl`).
-**Shipped in `AITER_REF` v0.1.20 (2026-08-18)**; the overlay was removed on the
-bump to v0.1.20. If reverting to v0.1.19.x, restore the overlay from git
-history and clear caches per the cache-clearing notes.
-
-**Impact**: cosmetic only — a traceback at process exit in the prewarm and any
-short-lived aiter process. No effect on the running server.
-
-**Workaround (removed)**: the overlay `patches/aiter/torch_guard.py` passed the
-bare op name to `define`/`impl`, which `Library("aiter")` namespaces itself;
-`torch.ops.aiter.*` still resolves. With `AITER_REF` ≥ v0.1.20 the fix ships
-upstream, so no overlay is needed.
+- **MTP token loops on Qwen3-MoE** ([#47087](https://github.com/vllm-project/vllm/issues/47087)):
+  deep agentic conversations on Qwen3-MoE degenerated into garbled token loops.
+  Permanent workaround: MTP disabled on 35B-A3B (`VLLM_SPEC_DECODE=` empty),
+  at a cost of ~185 tg32 (MTP4) → ~83 tg32 (no MTP).
 
 ## Dead ends
 
@@ -285,8 +242,8 @@ torch 2.13, triton 3.8.0+git (ROCm 7.14.0). The 0.27.0 → 0.27.1 bump is a
 packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
 KV dtype per row is as labeled; the **current default stack is fp8 KV**
 (`VLLM_KV_CACHE_DTYPE=fp8`). MTP4 is enabled for Qwen3.6-27B, MTP3 for
-Qwen3.8-27B; disabled for 35B-A3B (see "MTP bug" above and "Key tuning
-decisions"). The Qwen3.8-27B row below was measured with BF16 KV + tuned
+Qwen3.8-27B; disabled for 35B-A3B (see "MTP concurrency bug" and "Archived
+issues"). The Qwen3.8-27B row below was measured with BF16 KV + tuned
 dense, MTP3, froggeric chat template, thinking off.
 
 | model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
