@@ -18,11 +18,6 @@ x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   # some clients send (upstream rejects empty tools arrays). Version-locked to
   # VLLM_REF=v0.27.1; refresh from patches/vllm/protocol.py on upgrade.
   - ./patches/vllm/protocol.py:/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/openai/chat_completion/protocol.py:ro
-  # Overlay of aiter's torch_guard.py: aiter registers ops with a
-  # double-namespaced qualname (`aiter::aiter::op`), which crashes torch's
-  # `_clear_torch_ops_cache` at interpreter exit. Pass bare op names instead.
-  # Version-locked to AITER_REF=v0.1.19.post2; refresh on upgrade.
-  - ./patches/aiter/torch_guard.py:/opt/venv/lib/python3.12/site-packages/aiter/jit/utils/torch_guard.py:ro
   # Mount the whole home so every tool's dot-dir (caches, kernel JIT dirs) is
   # user-owned on the host. Cache dirs are redirected under ~/.cache via env
   # (TRITON_CACHE_DIR, TORCHINDUCTOR_CACHE_DIR, AITER_JIT_DIR, TILELANG_CACHE_DIR)

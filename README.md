@@ -52,12 +52,12 @@ host render group gid for `/dev/dri` access — check with `getent group render`
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
 | PyTorch      | 2.13.0+rocm7.14.0 |
 | vLLM         | 0.27.1 |
-| AITER        | v0.1.19.post2 |
+| AITER        | v0.1.20 |
 | Flash Attention | @ 1cc7ff67 |
 
 ROCm 7.14 is on AMDs "TheRock" technology-preview stream (7.9/7.13/7.14); the
-production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.19.post2` is
-the latest tagged release; vLLM is the 0.27.1 release since `gfx1201`
+production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.20` is the
+latest tagged release; vLLM is the 0.27.1 release since `gfx1201`
 requires source builds.
 
 The default (active) model is `Qwen/Qwen3.8-27B-FP8` (`qwen3.8-27b`, the
@@ -141,17 +141,6 @@ the pinned dependency.
   no-tools request when `tool_choice` is `"none"`/omitted, while still rejecting
   genuinely invalid combos (`auto`/`required`/named tool_choice with empty
   tools).
-- **Fix aiter op-namespace teardown crash** (`patches/aiter/torch_guard.py`,
-  pinned to `AITER_REF` v0.1.19.post2): aiter registers ops with a
-  namespace-prefixed name (`aiter::{opname}`) on a `Library("aiter")`, so torch
-  records `aiter::aiter::{opname}` in its bookkeeping. At interpreter exit
-  torch's `_clear_torch_ops_cache` does `qualname.split("::")` expecting exactly
-  two parts and crashes with `ValueError: too many values to unpack`. The
-  overlay of `aiter/jit/utils/torch_guard.py` passes the bare op name, which
-  `Library("aiter")` namespaces itself; `torch.ops.aiter.*` still resolves.
-  Upstream fixed the same bug in ROCm/aiter PR #4593 (merged 2026-08-06, see
-  "aiter op-namespace teardown crash" below); it has not shipped in a release
-  yet, so this overlay stays until `AITER_REF` bumps past the fix.
 
 ### Runtime env knobs
 
@@ -260,18 +249,18 @@ interpreter shutdown in the throwaway prewarm container.
 commit independently confirms this diagnosis: torch ≥2.13 stores the doubled
 `aiter::aiter::<op>` in `_op_defs` (2.12 stripped it), and the shutdown
 `qualname.split("::")` raises `too many values to unpack`. The upstream patch
-matches our overlay byte-for-byte (bare op name to `define`/`impl`). The fix is
-**not yet in any release** — the newest tag `v0.1.19.post2` (2026-08-05)
-predates the merge by one day. Expect it in the next `v0.1.19.post3`/`v0.1.20`;
-our overlay stays until `AITER_REF` is bumped past the fix (then drop it and
-clear caches per the cache-clearing notes).
+matches our former overlay byte-for-byte (bare op name to `define`/`impl`).
+**Shipped in `AITER_REF` v0.1.20 (2026-08-18)**; the overlay was removed on the
+bump to v0.1.20. If reverting to v0.1.19.x, restore the overlay from git
+history and clear caches per the cache-clearing notes.
 
 **Impact**: cosmetic only — a traceback at process exit in the prewarm and any
 short-lived aiter process. No effect on the running server.
 
-**Workaround**: `patches/aiter/torch_guard.py` (see "Runtime overlays" above)
-passes the bare op name to `define`/`impl`, which `Library("aiter")` namespaces
-itself; `torch.ops.aiter.*` still resolves.
+**Workaround (removed)**: the overlay `patches/aiter/torch_guard.py` passed the
+bare op name to `define`/`impl`, which `Library("aiter")` namespaces itself;
+`torch.ops.aiter.*` still resolves. With `AITER_REF` ≥ v0.1.20 the fix ships
+upstream, so no overlay is needed.
 
 ## Dead ends
 
