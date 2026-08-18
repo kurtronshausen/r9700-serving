@@ -80,7 +80,7 @@ Runtime environment is split across files:
 ### Chat template
 
 All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
-(`chat-templates/qwen.jinja`, pinned to **v22** — `qwen3.8-froggeric-v22`,
+(`chat-templates/qwen.jinja`, pinned to **v22.1** — `qwen3.8-froggeric-v22.1`,
 fetched from the repo's `main`). It is applied to every model via
 `--chat-template` in `compose.yaml`, overriding each model's bundled template.
 The template fixes rendering bugs, KV-cache invalidation, token waste, and
@@ -114,7 +114,8 @@ curl -L -o chat-templates/qwen.jinja \
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
   **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
-  across all profiles.
+  (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on the MTP profiles
+  to stay below the #35288 corruption threshold (see "MTP bug").
 - **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
   the default across all Qwen profiles — it halves KV-cache memory (enabling
   the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
@@ -202,26 +203,32 @@ Key tuning decisions:
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
 
-### MTP bug (35B only)
+### MTP bug (35B) and MTP concurrency bug (dense)
 
-vLLM's native MTP speculative decoding has a confirmed bug with Qwen3-MoE models
-(`Qwen3.6-35B-A3B`, `Qwen3.6-27B-A3B`) where deep agentic conversations degenerate
-into garbled token loops with no usable output. This affects multiple upstream issues:
+vLLM's native MTP speculative decoding has two confirmed bugs that affect this
+stack:
 
-| Issue | Summary |
-|:------|:--------|
-| [vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087) | MTP token loops on Qwen3-MoE; output quality collapse mid-conversation |
-| [vllm-project/vllm#35288](https://github.com/vllm-project/vllm/issues/35288) | Native MTP speculative decoding instability on MoE architectures |
+| Issue | Summary | Scope |
+|:------|:--------|:------|
+| [vllm-project/vllm#47087](https://github.com/vllm-project/vllm/issues/47087) | MTP token loops on Qwen3-MoE; output quality collapse mid-conversation | 35B-A3B |
+| [vllm-project/vllm#35288](https://github.com/vllm-project/vllm/issues/35288) | MTP produces corrupted output when 4+ decode sequences share a batch (garbage header → repetition loop → `max_tokens`) | dense 27B MTP profiles |
 
-**Impact**: 35B-A3B throughput drops from ~185 tg32 (MTP4) to ~83 tg32 (no MTP).
-The 27B (dense) model is unaffected and MTP works correctly.
+**35B**: MTP disabled. 35B-A3B throughput drops from ~185 tg32 (MTP4) to ~83
+tg32 (no MTP).
 
-**Workaround**: `compose.yaml` and `env/qwen3.6-35b-a3b.env` disable MTP for
-the 35B model only. The 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
+**Dense 27B**: MTP works correctly at c1–3, but vLLM never forms a ≥4-sequence
+decode batch: `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2` (see "MTP
+workaround" below), so concurrent decode batches stay below the corruption
+threshold regardless of incoming concurrency. Verified with the #35288 repro
+(4/6/8 concurrent requests → all coherent) and the 400-request stress test.
+
+**Workaround**: the 35B profile sets `VLLM_SPEC_DECODE=` (empty), skipping
 `--speculative-config`. The dense profiles override `VLLM_SPEC_DECODE` from
 `qwen3.6.env.common`: `qwen3.6-27b` inherits MTP4, `qwen3.8-27b` overrides to
 MTP3 (its MTP head accepts drafts poorly past position 3 — see "Key tuning
-decisions").
+decisions"). Because #35288 corrupts output when 4+ decode sequences share a
+batch, `qwen3.6.env.common` also sets `VLLM_MAX_NUM_SEQS=2`, capping concurrent
+sequences below the trigger for the MTP profiles.
 
 ### aiter op-namespace teardown crash
 

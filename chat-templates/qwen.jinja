@@ -1,4 +1,4 @@
-{%- set template_version = "qwen3.8-froggeric-v22" %}
+{%- set template_version = "qwen3.8-froggeric-v22.1" %}
 {%- set _tool_format = tool_call_format if tool_call_format is defined else 'xml' %}
 {%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
@@ -15,7 +15,20 @@
 {%- set max_tool_arg_chars = max_tool_arg_chars if max_tool_arg_chars is defined else 0 %}
 {%- set max_tool_response_chars = max_tool_response_chars if max_tool_response_chars is defined else 0 %}
 {%- set _has_tools = (tools is defined and tools and tools is iterable and tools is not mapping) %}
-{%- set ns_state = namespace(thinking=enable_thinking) %}
+{%- set _effort_raw = (reasoning_effort | string | lower) if reasoning_effort is defined and reasoning_effort is not none else 'medium' %}
+{%- set _initial_thinking = enable_thinking %}
+{%- set _initial_effort = 'medium' %}
+{%- if _effort_raw == 'none' %}
+    {%- set _initial_thinking = false %}
+    {%- set _initial_effort = 'medium' %}
+{%- elif _effort_raw == 'minimal' or _effort_raw == 'low' %}
+    {%- set _initial_effort = 'low' %}
+{%- elif _effort_raw == 'high' or _effort_raw == 'xhigh' or _effort_raw == 'max' %}
+    {%- set _initial_effort = 'xhigh' %}
+{%- else %}
+    {%- set _initial_effort = 'medium' %}
+{%- endif %}
+{%- set ns_state = namespace(thinking=_initial_thinking, effort=_initial_effort) %}
 {%- if auto_disable_thinking_with_tools and _has_tools %}
     {%- set ns_state.thinking = false %}
 {%- endif %}
@@ -26,35 +39,50 @@
                 {%- set ns_state.thinking = false %}
             {%- elif '<|think_on|>' in msg.content %}
                 {%- set ns_state.thinking = true %}
+            {%- elif '<|think_xhigh|>' in msg.content or '<|think_high|>' in msg.content %}
+                {%- set ns_state.thinking = true %}
+                {%- set ns_state.effort = 'xhigh' %}
+            {%- elif '<|think_low|>' in msg.content or '<|think_minimal|>' in msg.content %}
+                {%- set ns_state.thinking = true %}
+                {%- set ns_state.effort = 'low' %}
+            {%- elif '<|think_medium|>' in msg.content %}
+                {%- set ns_state.thinking = true %}
+                {%- set ns_state.effort = 'medium' %}
             {%- endif %}
         {%- elif msg.content is iterable and msg.content is not mapping %}
             {%- for item in msg.content %}
-                {%- if item is mapping and 'text' in item and item.text is string %}
-                    {%- if '<|think_off|>' in item.text %}
+                {%- if item is string %}
+                    {%- set _item_text = item %}
+                {%- elif item is mapping and 'text' in item and item.text is string %}
+                    {%- set _item_text = item.text %}
+                {%- else %}
+                    {%- set _item_text = '' %}
+                {%- endif %}
+                {%- if _item_text %}
+                    {%- if '<|think_off|>' in _item_text %}
                         {%- set ns_state.thinking = false %}
-                    {%- elif '<|think_on|>' in item.text %}
+                    {%- elif '<|think_on|>' in _item_text %}
                         {%- set ns_state.thinking = true %}
+                    {%- elif '<|think_xhigh|>' in _item_text or '<|think_high|>' in _item_text %}
+                        {%- set ns_state.thinking = true %}
+                        {%- set ns_state.effort = 'xhigh' %}
+                    {%- elif '<|think_low|>' in _item_text or '<|think_minimal|>' in _item_text %}
+                        {%- set ns_state.thinking = true %}
+                        {%- set ns_state.effort = 'low' %}
+                    {%- elif '<|think_medium|>' in _item_text %}
+                        {%- set ns_state.thinking = true %}
+                        {%- set ns_state.effort = 'medium' %}
                     {%- endif %}
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
     {%- endif %}
 {%- endfor %}
-{%- set _effort_raw = reasoning_effort if reasoning_effort is defined else 'xhigh' %}
-{%- if _effort_raw == 'high' or _effort_raw == 'xhigh' %}
-    {%- set _reasoning_effort = 'xhigh' %}
-{%- elif _effort_raw == 'low' %}
-    {%- set _reasoning_effort = 'low' %}
-{%- elif _effort_raw == 'medium' %}
-    {%- set _reasoning_effort = 'medium' %}
-{%- else %}
-    {%- set _reasoning_effort = 'xhigh' %}
-{%- endif %}
 {%- set reasoning_instructions = '' %}
 {%- if ns_state.thinking %}
-    {%- if _reasoning_effort == 'xhigh' %}
+    {%- if ns_state.effort == 'xhigh' %}
         {%- set reasoning_instructions = 'Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.' %}
-    {%- elif _reasoning_effort == 'low' %}
+    {%- elif ns_state.effort == 'low' %}
         {%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.' %}
     {%- endif %}
 {%- endif %}
@@ -115,11 +143,13 @@
 {%- set _sc = '' %}
 {%- if _sys_msg is not none %}
     {%- set _sc = render_content(_sys_msg.content, false, true) | trim %}
-    {%- if '<|think_off|>' in _sc %}
-        {%- set _sc = _sc.split('<|think_off|>') | join('') | trim %}
-    {%- elif '<|think_on|>' in _sc %}
-        {%- set _sc = _sc.split('<|think_on|>') | join('') | trim %}
-    {%- endif %}
+    {%- if '<|think_off|>' in _sc %}{%- set _sc = _sc.split('<|think_off|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_on|>' in _sc %}{%- set _sc = _sc.split('<|think_on|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_xhigh|>' in _sc %}{%- set _sc = _sc.split('<|think_xhigh|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_high|>' in _sc %}{%- set _sc = _sc.split('<|think_high|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_medium|>' in _sc %}{%- set _sc = _sc.split('<|think_medium|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_low|>' in _sc %}{%- set _sc = _sc.split('<|think_low|>') | join('') | trim %}{%- endif %}
+    {%- if '<|think_minimal|>' in _sc %}{%- set _sc = _sc.split('<|think_minimal|>') | join('') | trim %}{%- endif %}
 {%- endif %}
 {%- if _has_tools %}
     {{- '<|im_start|>system\n' }}
@@ -172,11 +202,13 @@
     {%- set is_system = (message.role == "system" or message.role == "developer") %}
     {%- set content = render_content(message.content, true, is_system) | trim %}
     {%- if is_system or message.role == 'user' %}
-        {%- if '<|think_off|>' in content %}
-            {%- set content = content.split('<|think_off|>') | join('') | trim %}
-        {%- elif '<|think_on|>' in content %}
-            {%- set content = content.split('<|think_on|>') | join('') | trim %}
-        {%- endif %}
+        {%- if '<|think_off|>' in content %}{%- set content = content.split('<|think_off|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_on|>' in content %}{%- set content = content.split('<|think_on|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_xhigh|>' in content %}{%- set content = content.split('<|think_xhigh|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_high|>' in content %}{%- set content = content.split('<|think_high|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_medium|>' in content %}{%- set content = content.split('<|think_medium|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_low|>' in content %}{%- set content = content.split('<|think_low|>') | join('') | trim %}{%- endif %}
+        {%- if '<|think_minimal|>' in content %}{%- set content = content.split('<|think_minimal|>') | join('') | trim %}{%- endif %}
     {%- endif %}
     {%- if is_system %}
         {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
@@ -272,7 +304,7 @@
                                     {%- set _av = args_value | string %}
                                 {%- endif %}
                                 {%- if max_tool_arg_chars > 0 and _av | length > max_tool_arg_chars %}
-                                    {{- _av[:max_tool_arg_chars] + '\n[TRUNCATED — original length ' ~ (_av | length | string) ~ ' chars]' }}
+                                    {{- _av[:max_tool_arg_chars] + '\n[TRUNCATED - original length ' ~ (_av | length | string) ~ ' chars]' }}
                                 {%- else %}
                                     {{- _av }}
                                 {%- endif %}
@@ -299,7 +331,7 @@
             {{- '<|im_start|>user' }}
         {%- endif %}
         {%- if max_tool_response_chars > 0 and content | length > max_tool_response_chars %}
-            {%- set content = content[:max_tool_response_chars] + '\n[TRUNCATED — original length ' ~ (content | length | string) ~ ' chars]' %}
+            {%- set content = content[:max_tool_response_chars] + '\n[TRUNCATED - original length ' ~ (content | length | string) ~ ' chars]' %}
         {%- endif %}
         {{- '\n<tool_response>\n' + content }}
         {%- if ns2.consecutive_failures >= 2 %}
