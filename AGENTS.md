@@ -91,3 +91,111 @@ just --set model qwen3.6-27b up
 - If `just rebuild` terminates (signal 15 / timeout), check the image with
   `docker inspect localhost/vllm-fullbuild:latest` to verify completion before
   attempting `just up`.
+
+## Checking for Updates
+
+When asked to "check for updates" (or when a new release is suspected), compare
+the pins in `.env`/`.env.example` against upstream, then look for **patches
+that affect this GPU setup and model combo** before recommending a bump.
+
+### 1. Upstream release state
+
+```sh
+# vLLM — current pin VLLM_REF=v0.27.1
+gh release list -R vllm-project/vllm --limit 8
+
+# AITER — current pin AITER_REF=v0.1.20
+gh release list -R ROCm/aiter --limit 8
+
+# Flash Attention — pinned to a commit, so compare HEAD to FLASH_ATTN_REF
+git ls-remote https://github.com/ROCm/flash-attention.git HEAD
+
+# ROCm base image — current ROCM_IMAGE=rocm/dev-ubuntu-24.04:7.14.0-full
+curl -s "https://hub.docker.com/v2/repositories/rocm/dev-ubuntu-24.04/tags?page_size=100&name=7.1" | jq -r '.results[].name' | sort -V | tail
+```
+
+Report what's newer than the current pins and whether the bump is worth it
+(see relevance filters below). Do **not** auto-bump pins.
+
+### 2. Scan for open issues affecting this setup
+
+Beyond checking the watchlist (below), actively search for **new** open
+issues/PRs each time. Report anything that changes the picture; do **not**
+auto-apply fixes.
+
+```sh
+# Re-check watchlist status (open/closed/resolved) + any new labels:
+for n in 35288 47087 48375 52520 45238 51562 51812 51837 51766; do
+  gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
+    | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
+done
+
+# New open issues by theme (MTP, hybrid, ROCm, prefix caching):
+gh search issues -R vllm-project/vllm --state open --limit 25 "MTP" \
+  --json number,title,updatedAt | jq -r '.[] | "\(.number) | \(.updatedAt) | \(.title)"'
+gh search issues -R vllm-project/vllm --state open --limit 25 "hybrid" --json number,title
+gh search issues -R vllm-project/vllm --state open --limit 25 "ROCm" --json number,title
+gh search issues -R vllm-project/vllm --state open --limit 25 "mamba" --json number,title
+```
+
+Apply the relevance filters from step 3 when triaging results: a fix only
+matters here if it touches `gfx1201`/ROCm, the hybrid GDN/Mamba path, MTP/
+speculative decoding, prefix caching (align mode), fp8 KV, AITER unified
+attention, or one of the tracked models. NVIDIA/CUDA-only issues are out of
+scope even if the model matches. For a candidate issue, read its body and
+comments: confirm the root cause matches a path this stack actually reaches
+(e.g. check whether an option the issue requires — async scheduling,
+KV connectors, DSpark — is even enabled here) before recommending a fix.
+
+### 3. Relevance filters — does the update matter here?
+
+This stack is not a stock vLLM install. A fix/perf change only matters if it
+touches one of:
+
+- **GPU**: `gfx1201` (RDNA4, 2× R9700), ROCm 7.14.0. ROCm-only issues and
+  AITER unified-attention paths are in scope; NVIDIA/CUDA-only fixes are not.
+- **Models**: Qwen3.6-27B (dense, MTP4), Qwen3.6-35B-A3B (MoE, MTP off),
+  Qwen3.8-27B (hybrid GDN, MTP3, 256K context, fp8 KV). Anything touching:
+  hybrid Mamba/GDN models, MTP/speculative decoding, prefix caching
+  (align mamba cache mode), fp8 KV, or `ROCM_AITER_UNIFIED_ATTN` is in scope.
+- **Known-bug watchlist** (search/check these before recommending a vLLM bump):
+  - `#35288` MTP concurrency corruption (still mitigated by `max-num-seqs 2`)
+  - `#47087` MTP token loops on Qwen3-MoE (resolved by #51113, in v0.27.1 —
+    pending 35B MTP re-test)
+  - `#51812` Qwen GDN gate/spec-token alignment — **carried as a local patch**
+  - `#51837` ROCm KV-first attention blocks sharing pages with Mamba —
+    **carried as a local patch**
+  - `#48375` MambaManager ignores `drop_eagle_block` (MTP + prefix caching
+    corrupts hybrid recurrent state, #43559/#50188) — **carried as a local patch**
+  - `#52520` align-mode admission livelock near KV-pool ceiling (open)
+  - `#45238` hybrid prefix caching drops to 0% in align mode (open)
+  - `#51562` GDN metadata misclassifies stateless first chunk (open)
+  - `#51766` Mamba running CoW after external hits (only w/ KV connectors)
+
+### 4. Local patches vs upstream
+
+`patches/vllm/*.patch` and `patches/aiter/*.patch` are cherry-picks/overrides
+applied at build time. Before bumping any pin:
+
+- Check whether a newer `VLLM_REF` **already contains** a carried patch (the
+  fix landed upstream). If so, the patch should be **dropped**, not kept.
+  Verify: `gh pr view <pr> --repo vllm-project/vllm` and check the PR's merged
+  status + which release tag includes it (compare tag commits via
+  `git ls-remote --tags https://github.com/vllm-project/vllm.git`).
+- After any pin change, verify each patch still applies cleanly on the new
+  ref before building; a failed `git apply` in `Dockerfile.fullbuild` aborts
+  the build. Bump the version-lock comment in each patch header too.
+- Always `just clear-vllm-caches` after a `VLLM_REF`/`VLLM_VERSION`/`AITER_REF`
+  change, then `just rebuild` (see Rebuild Timeouts).
+
+### 5. Recommended bump checklist
+
+1. Diff `.env.example` vs `.env` — keep both in sync.
+2. Update `VLLM_REF` + `VLLM_VERSION` together; verify `AITER_REF` and
+   `FLASH_ATTN_REF` are compatible with the new vLLM release notes.
+3. Check `TORCH_VERSION`/`TORCHVISION_VERSION` against the vLLM release's
+   supported ROCm/PyTorch stack.
+4. Re-check the patch watchlist (step 2/3) and drop/rebase local patches.
+5. `just clear-vllm-caches && just rebuild && just up`, then `just bench` to
+   confirm no regression vs `README.md`/`benchmarks/` baselines.
+6. Update `README.md` (patches, pins, bench tables) and commit to `origin`.

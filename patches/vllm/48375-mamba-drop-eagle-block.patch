@@ -1,0 +1,55 @@
+From d3bdb29e503a9e2deac9e147dfc774f2e40b241c Mon Sep 17 00:00:00 2001
+From: OpenCode <opencode@localhost>
+Date: Wed, 19 Aug 2026 09:00:00 +0000
+Subject: [PATCH] [BugFix] Honor drop_eagle_block in MambaManager (#48375)
+
+Adapted for VLLM_REF=v0.27.1. Upstream PR #48375 (still open upstream as of
+2026-08-19) against vllm main; the hunk context is identical in v0.27.1's
+`MambaManager.find_longest_cache_hit` (vllm/v1/core/single_type_kv_cache_manager.py).
+
+On a hybrid model (full-attention + Mamba/GDN layers, e.g. Qwen3.6-27B,
+Qwen3.8-27B), enabling MTP/EAGLE speculative decoding together with prefix
+caching corrupts the recurrent state, and the server serves wrong answers.
+#43559 reports tool-eval accuracy dropping from ~90% to ~50%; #50188 confirms
+MTP + prefix caching + tool calling corrupts tool-call emission on repeated
+identical prompts. Nothing raises an exception and nothing shows up in the
+logs, so an operator has no signal that anything is wrong, and prefix caching
+then spreads it, because the corrupted state is hash-reachable and every later
+request sharing that prefix restores from it.
+
+The root cause is `MambaManager.find_longest_cache_hit` accepting
+`drop_eagle_block` and ignoring it: the final matched block of a cache hit can
+hold state written over draft positions that verification later rejects, so it
+must be dropped and recomputed (FullAttentionManager pops it). Mamba keeps only
+the rightmost real block with the prefix null-padded, so a literal pop would
+delete the state block itself -- lower the search ceiling by one page instead.
+
+---
+ vllm/v1/core/single_type_kv_cache_manager.py | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index 598bddf..3d5f7c2 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -1329,6 +1329,15 @@ def find_longest_cache_hit(
+                     hit_length = num_tokens
+                     break
+             return computed_blocks, hit_length
+ 
+         max_num_blocks = max_length // block_size
++        if drop_eagle_block and max_num_blocks > 0:
++            # EAGLE/MTP: drop the final matched page. Its recurrent-state snapshot
++            # may have been taken over draft tokens that verification later rejects,
++            # so the state must be restored from the previous page boundary and
++            # recomputed forward. FullAttentionManager (see find_longest_cache_hit
++            # above) pops the last block; Mamba keeps only the rightmost real block
++            # with the prefix null-padded, so a literal pop would delete the state
++            # block itself -- lower the search ceiling by one page instead.
++            max_num_blocks -= 1
+         # Search from right to left and early stop when a match is found.
+         for i in range(max_num_blocks - 1, -1, -1):
+             if cached_block := block_pool.get_cached_block(
+                 block_hashes[i], kv_cache_group_ids
+             ):
+--

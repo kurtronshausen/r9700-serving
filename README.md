@@ -167,6 +167,17 @@ when bumping `VLLM_REF`.
   0.20 vs 0.95 upstream). Fix lays KV-first views out page-first when the
   allocation is shared with Mamba. Protects the hybrid Qwen3.8-27B GDN path
   on ROCm; not observed on gfx1201, kept as insurance.
+- **Honor `drop_eagle_block` in `MambaManager`**
+  (`patches/vllm/48375-mamba-drop-eagle-block.patch`,
+  [#48375](https://github.com/vllm-project/vllm/pull/48375), adapted for
+  v0.27.1): `MambaManager.find_longest_cache_hit` accepted `drop_eagle_block`
+  and ignored it, so on hybrid GDN models with MTP/EAGLE + prefix caching the
+  final matched page of a cache hit could hold recurrent state written over
+  draft positions that verification later rejects — silent corruption that
+  cache hits then spread to every later request sharing the prefix (#43559,
+  #50188). Fix lowers the search ceiling by one page (a literal pop would
+  delete Mamba's rightmost real state block). Still open upstream; carried as
+  a local patch.
 
 ### Runtime env knobs
 
@@ -249,8 +260,9 @@ Resolved upstream or superseded; kept for reference.
 
 - **MTP token loops on Qwen3-MoE** ([#47087](https://github.com/vllm-project/vllm/issues/47087)):
   deep agentic conversations on Qwen3-MoE degenerated into garbled token loops.
-  Permanent workaround: MTP disabled on 35B-A3B (`VLLM_SPEC_DECODE=` empty),
-  at a cost of ~185 tg32 (MTP4) → ~83 tg32 (no MTP).
+  **Resolved upstream by #51113 (in v0.27.1).** MTP remains disabled on 35B-A3B
+  (`VLLM_SPEC_DECODE=` empty) pending a re-test of MTP on that profile, which
+  would recover ~185 tg32 (MTP4) vs ~83 tg32 (no MTP).
 
 ## Dead ends
 
@@ -322,11 +334,12 @@ t/s) and e2e TTFT scales linearly to 63.8 s at d128K. See
 [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md)
 and the d0 reference [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md).
 
-### Patched build (v0.27.1 + #51812 + #51837, 2026-08-19)
+### Patched build (v0.27.1 + #51812 + #51837 + #48375, 2026-08-19)
 
-Same default stack with the two source-build cherry-picks described under
+Same default stack with the three source-build cherry-picks described under
 "Source-build patches" above (Qwen GDN gate/spec-token alignment #51812, ROCm
-KV-first attention blocks page fix #51837). d0 benchmark and depth sweep:
+KV-first attention blocks page fix #51837, MambaManager honors `drop_eagle_block`
+#48375). d0 benchmark and depth sweep (below), then a post-#48375 re-bench:
 
 | model       |   test |            t/s |     peak t/s |  e2e_ttft (ms) |
 |:------------|-------:|---------------:|-------------:|---------------:|
@@ -347,8 +360,15 @@ Prefill and TTFT match the 08-18 sweep to within ~1%, so the cherry-picks add
 no throughput regression. Decode is flat-to-better through d32K (60–62 vs
 55–60) with tg32 up ~21% at d0 (72.1 vs 59.7); the single d64K point is a
 2-run-sample outlier. Coherence test passed throughout — no token loops,
-garbage, or NaN corruption on the hybrid GDN path. Full tables in
+garbage, or NaN corruption on the hybrid GDN path. After the third patch
+(#48375) was added and the server restarted, a fresh d0 bench confirmed no
+regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). Full tables in
 [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md).
+
+Also noted this cycle: **#47087 (MTP token loops on Qwen3-MoE) is resolved
+upstream by #51113** (already in v0.27.1); the 35B-A3B profile still runs MTP
+disabled pending a re-test, which would recover ~185 tg32 (MTP4) vs ~83 tg32
+(no MTP).
 
 ### Long-context concurrency
 
