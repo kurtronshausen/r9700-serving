@@ -254,6 +254,65 @@ corruption threshold regardless of incoming concurrency. Verified with the
 stress test. Dense MTP stays enabled (MTP4 on Qwen3.6-27B, MTP3 on
 Qwen3.8-27B); 35B-A3B runs MTP disabled — see archived issues below.
 
+### Upstream watchlist
+
+Open upstream issues that touch this stack (checked 2026-08-19; see also the
+`AGENTS.md` update-check workflow, which keeps this list fresh):
+
+- **`#52793` fp8 KV on hybrid models falls back to scale 1.0**
+  ([#52793](https://github.com/vllm-project/vllm/issues/52793), open):
+  `--calculate-kv-scales` is deprecated in v0.27.1 — scales are loaded from the
+  checkpoint or default to 1.0, and Qwen3.8-27B-FP8 ships no `k/v_scale`
+  tensors, so **this stack runs fp8 KV at scale 1.0** (server warns
+  `kv_cache.py:151`). Upstream observed outlier clipping / wrong retrieval at
+  200k+ context on hybrid models. **Empirically fine here so far**: the 256K
+  depth sweep passed coherence at d128K with correct output, so 3.8-27B K/V
+  magnitudes fit fp8-e4m3 without a learned scale. Residual risk is silent —
+  a long-context (200k+) needle-style accuracy probe would confirm.
+- **`#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
+  also sizes the CUDA-graph pool** ([#52872](https://github.com/vllm-project/vllm/issues/52872),
+  open): the startup memory profile under-predicts large-prefill activation
+  peak on hybrid GDN, and lowering `--max-num-batched-tokens` frees memory
+  twice (activation + CUDA-graph pool, ~10% context). Relevant to the
+  `VLLM_MAX_BATCHED_TOKENS=4096` cap on 35B-A3B.
+- **`#47602` MTP acceptance rate decays with context length**
+  ([#47602](https://github.com/vllm-project/vllm/issues/47602), open, on
+  Qwen3.6-27B): draft acceptance falls with total context, so long-context MTP
+  can regress vs no-MTP; no length-gating knob for `num_speculative_tokens`.
+- **`#51250` prefix caching is a silent no-op on GDN hybrid**
+  ([#51250](https://github.com/vllm-project/vllm/issues/51250), open): 0% APC
+  hits on Qwen3.6-35B-A3B because recurrent state has no APC entry. Same family
+  as tracked `#45238`.
+- **`#45238`** hybrid prefix caching drops to 0% in align mode (open),
+  **`#52520`** align-mode admission livelock near the KV-pool ceiling (open),
+  **`#51562`** GDN metadata misclassifies a stateless first chunk as decode
+  (open, no fix yet).
+
+### Known to ignore (checked, not applicable to this stack)
+
+Issues verified out of scope on 2026-08-19; re-check only if the stack changes
+(platform, model, or a knob flips):
+
+- **`#52475`** MTP repetition collapse with turboquant KV — NVIDIA sm120 KV
+  quant; this stack is ROCm gfx1201 with standard fp8/bfloat16 KV.
+- **`#52480`** `qwen3_5_mtp` fails at TP≥2 — Qwen3.5 drafter, not the Qwen3.6/3.8
+  MTP heads used here.
+- **`#52583`** prefix caching hangs on Qwen3.8-**VL** multimodal inputs — this
+  stack serves text-only Qwen3.8-27B (`--limit-mm-per-prompt` has no image
+  path).
+- **`#51752`** hybrid block-size alignment skipped on PP ranks — this stack is
+  TP2, no pipeline parallelism.
+- **`#51530`** DeepSeek-V4 sparse indexer on ROCm, **`#51957`** AITER FP8 BMM
+  with DP attention, **`#40017`** NIXL P/D disaggregation, **`#51805`**/
+  **`#51766`** KV-connector paths — all require connectors, DP, DSpark, or
+  disaggregation this stack does not use.
+- **`#51971`** Qwen3 MoE GPTQ `qzeros` on gfx1201 — GPTQ path; profiles use FP8
+  / BF16 checkpoints.
+- **`#51571`** async MTP align accepted-count race — async scheduling is
+  auto-disabled for MTP (`config/vllm.py:1108`), unreachable here.
+- **`#52312`** BF16 MLA with `ROCM_AITER_FA` on gfx950, **`#52833`**/**`#48568`**
+  GLM-5.2 MTP on MI-series — different GPU/model combo than gfx1201 + Qwen.
+
 ### Archived issues
 
 Resolved upstream or superseded; kept for reference.
