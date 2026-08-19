@@ -164,7 +164,9 @@ touches one of:
     pending 35B MTP re-test)
   - `#51812` Qwen GDN gate/spec-token alignment — **carried as a local patch**
   - `#51837` ROCm KV-first attention blocks sharing pages with Mamba —
-    **carried as a local patch**
+    **carried as a local patch** (inert on this stack: AITER unified attn is
+    blocks-first, `block_dim == 0`, so the fix's branch never fires; only
+    matters if a KV-first backend is ever selected)
   - `#48375` MambaManager ignores `drop_eagle_block` (MTP + prefix caching
     corrupts hybrid recurrent state, #43559/#50188) — **carried as a local patch**
   - `#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`

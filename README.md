@@ -166,7 +166,12 @@ when bumping `VLLM_REF`.
   Mamba/GDN state pages alias the same bytes (silent NaN corruption, GSM8K
   0.20 vs 0.95 upstream). Fix lays KV-first views out page-first when the
   allocation is shared with Mamba. Protects the hybrid Qwen3.8-27B GDN path
-  on ROCm; not observed on gfx1201, kept as insurance.
+  on ROCm; not observed on gfx1201, kept as insurance. **Inert on this
+  stack**: the fix only fires for KV-first backends (`block_dim != 0`), but
+  all attention layers here use `ROCM_AITER_UNIFIED_ATTN`, which is
+  blocks-first (`get_kv_cache_block_dim() == 0`) — the new reshape branch is
+  never taken. It only starts to matter if a KV-first backend (e.g. ROCm
+  flash-attn / `ROCM_ATTN`) is ever selected.
 - **Honor `drop_eagle_block` in `MambaManager`**
   (`patches/vllm/48375-mamba-drop-eagle-block.patch`,
   [#48375](https://github.com/vllm-project/vllm/pull/48375), adapted for
