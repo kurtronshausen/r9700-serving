@@ -259,16 +259,6 @@ Qwen3.8-27B); 35B-A3B runs MTP disabled — see archived issues below.
 Open upstream issues that touch this stack (checked 2026-08-19; see also the
 `AGENTS.md` update-check workflow, which keeps this list fresh):
 
-- **`#52793` fp8 KV on hybrid models falls back to scale 1.0**
-  ([#52793](https://github.com/vllm-project/vllm/issues/52793), open):
-  `--calculate-kv-scales` is deprecated in v0.27.1 — scales are loaded from the
-  checkpoint or default to 1.0, and Qwen3.8-27B-FP8 ships no `k/v_scale`
-  tensors, so **this stack runs fp8 KV at scale 1.0** (server warns
-  `kv_cache.py:151`). Upstream observed outlier clipping / wrong retrieval at
-  200k+ context on hybrid models. **Empirically fine here so far**: the 256K
-  depth sweep passed coherence at d128K with correct output, so 3.8-27B K/V
-  magnitudes fit fp8-e4m3 without a learned scale. Residual risk is silent —
-  a long-context (200k+) needle-style accuracy probe would confirm.
 - **`#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
   also sizes the CUDA-graph pool** ([#52872](https://github.com/vllm-project/vllm/issues/52872),
   open): the startup memory profile under-predicts large-prefill activation
@@ -310,6 +300,13 @@ Issues verified out of scope on 2026-08-19; re-check only if the stack changes
   / BF16 checkpoints.
 - **`#51571`** async MTP align accepted-count race — async scheduling is
   auto-disabled for MTP (`config/vllm.py:1108`), unreachable here.
+- **`#52793`** fp8 KV on hybrid models falls back to scale 1.0 — **verified
+  non-issue on this stack** (2026-08-19): Qwen3.8-27B-FP8 indeed runs fp8 KV
+  at scale 1.0 (no `k/v_scale` in the checkpoint; `--calculate-kv-scales`
+  deprecated in v0.27.1), but a d200K/d256K probe passed coherence at 258k
+  total tokens with clean logs and monotonic decode decay — the K/V
+  magnitudes fit fp8-e4m3 without a learned scale. Re-check only if a model
+  with larger K/V dynamic range or a different fp8-KV profile is added.
 - **`#52312`** BF16 MLA with `ROCM_AITER_FA` on gfx950, **`#52833`**/**`#48568`**
   GLM-5.2 MTP on MI-series — different GPU/model combo than gfx1201 + Qwen.
 
@@ -414,6 +411,8 @@ KV-first attention blocks page fix #51837, MambaManager honors `drop_eagle_block
 | 32768 |     2591.25 |     57.81 |         13.44 |
 | 65536 |     2370.84 |     45.70 |         28.51 |
 | 128000|     2035.60 |     48.02 |         63.90 |
+| 200000|     1743.31 |     35.60 |        115.91 |
+| 256000|     1562.51 |     33.81 |        165.17 |
 
 Prefill and TTFT match the 08-18 sweep to within ~1%, so the cherry-picks add
 no throughput regression. Decode is flat-to-better through d32K (60–62 vs
@@ -423,6 +422,13 @@ garbage, or NaN corruption on the hybrid GDN path. After the third patch
 (#48375) was added and the server restarted, a fresh d0 bench confirmed no
 regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). Full tables in
 [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md).
+
+**Deep-context probe (d200K/d256K, 2026-08-19):** run to stress the fp8-KV
+scale-1.0 config against #52793 (see watchlist). Both rows passed the
+coherence test with no NaN/corruption/worker death at 258k total tokens —
+right at the 262144 window limit — and decode/prefill decay monotonically
+(48 → 35.6 → 33.8 tg32; 2035 → 1743 → 1562 pp t/s). Scale-1.0 fp8 KV holds up
+at max context on this model.
 
 Also noted this cycle: **#47087 (MTP token loops on Qwen3-MoE) is resolved
 upstream by #51113** (already in v0.27.1); the 35B-A3B profile still runs MTP

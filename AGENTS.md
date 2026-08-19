@@ -125,7 +125,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52793 52872 47602 51250 52520 45238 51562 51812 51837 51766; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -167,9 +167,6 @@ touches one of:
     **carried as a local patch**
   - `#48375` MambaManager ignores `drop_eagle_block` (MTP + prefix caching
     corrupts hybrid recurrent state, #43559/#50188) — **carried as a local patch**
-  - `#52793` fp8 KV on hybrid models falls back to scale 1.0 — **this stack
-    runs Qwen3.8-27B fp8 KV at scale 1.0** (empirically fine; watch for
-    long-context outlier clipping)
   - `#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
     also sizes the CUDA-graph pool
   - `#47602` MTP draft acceptance decays with context length (Qwen3.6-27B)
@@ -184,7 +181,10 @@ Issues known **not** to apply (checked; re-check only if the stack changes):
 NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
 MTP), non-Qwen models (#52833/#48568 GLM, #51530 DeepSeek), or paths not
 reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
-#51766/#40017, GPTQ #51971, gfx950 MLA #52312).
+#51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52793 (fp8 KV scale-1.0 on
+hybrids) verified **non-issue** on this stack: Qwen3.8-27B fp8 KV runs at
+scale 1.0 but a d200K/d256K probe passed coherence at 258k tokens (see
+README); re-check only if a model with larger K/V range is added.
 
 ### 4. Local patches vs upstream
 
