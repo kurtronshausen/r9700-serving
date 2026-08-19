@@ -428,9 +428,13 @@ garbage, or NaN corruption on the hybrid GDN path. After the third patch
 regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). A later d0 re-bench the
 same day landed pp2048 at 3236/3285 (best TTFT seen, 626-635 ms) with tg32/tg128
 at 70.2/68.8 — attributed to run variance / less contended GPU state rather than
-a code change, since no stack change occurred between runs. Full tables in
-[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md)
-and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md).
+a code change, since no stack change occurred between runs. A same-day depth
+re-sweep (d4K–d128K) reproduced the morning table within ~1% on prefill and
+TTFT (2827→2034 t/s, 2.17→63.95 s) with decode 50–60 t/s through d32K decaying
+to 41.2 t/s at d128K — no regression from the patches. Full tables in
+[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md),
+[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md),
+and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md).
 
 **Deep-context probe (d200K/d256K, 2026-08-19):** run to stress the fp8-KV
 scale-1.0 config against #52793 (see watchlist). Both rows passed the
