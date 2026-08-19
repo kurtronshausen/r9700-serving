@@ -152,6 +152,10 @@ RUN mkdir vllm \
     && git -C vllm fetch --depth=1 --no-tags "${VLLM_REPO}" "${VLLM_REF}" \
     && git -C vllm checkout --detach FETCH_HEAD
 
+COPY patches/vllm/ /patches/vllm/
+
+RUN cd /src/vllm && for patch in /patches/vllm/*.patch; do [ -e "$patch" ] || continue; git apply "$patch"; done
+
 COPY --from=flash-attention-builder /wheels/ /dependency-wheels/
 COPY --from=aiter-builder /wheels/ /dependency-wheels/
 

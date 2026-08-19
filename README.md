@@ -143,6 +143,31 @@ the pinned dependency.
   genuinely invalid combos (`auto`/`required`/named tool_choice with empty
   tools).
 
+### Source-build patches (applied at image build time)
+
+Cherry-picks of upstream fixes merged to `main` after `VLLM_REF` v0.27.1.
+Applied by `Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the
+aiter patch loop). Verified to apply cleanly on the v0.27.1 tree; re-verify
+when bumping `VLLM_REF`.
+
+- **Align Qwen GDN gates with speculative tokens**
+  (`patches/vllm/51812-gdn-spec-gate-align.patch`,
+  [#51812](https://github.com/vllm-project/vllm/pull/51812)): in a mixed
+  prefill/decode batch the GDN `a`/`b` gates were gathered with full-batch
+  indices while `mixed_qkv` used spec/non-spec-split indices, so speculative
+  tokens could consume another request's gates. Measured upstream on
+  Qwen3.8-27B with MTP3 + prefix caching. Fixes correctness of MTP on the
+  dense GDN profiles (Qwen3.6-27B, Qwen3.8-27B).
+- **ROCm KV-first attention blocks share a page with Mamba state**
+  (`patches/vllm/51837-rocm-kv-first-mamba-pages.patch`,
+  [#51837](https://github.com/vllm-project/vllm/pull/51837)): with ROCm's
+  `(2, num_blocks, ...)` KV layout, block `b` spans half of two pages while
+  Mamba addresses its state by page, so hybrid-model attention blocks and
+  Mamba/GDN state pages alias the same bytes (silent NaN corruption, GSM8K
+  0.20 vs 0.95 upstream). Fix lays KV-first views out page-first when the
+  allocation is shared with Mamba. Protects the hybrid Qwen3.8-27B GDN path
+  on ROCm; not observed on gfx1201, kept as insurance.
+
 ### Runtime env knobs
 
 Non-standard environment set across `compose.yaml`, `Dockerfile.fullbuild`,
@@ -296,6 +321,34 @@ the growing attention span. Full-context prefill degrades −28% (2827 → 2038
 t/s) and e2e TTFT scales linearly to 63.8 s at d128K. See
 [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md)
 and the d0 reference [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md).
+
+### Patched build (v0.27.1 + #51812 + #51837, 2026-08-19)
+
+Same default stack with the two source-build cherry-picks described under
+"Source-build patches" above (Qwen GDN gate/spec-token alignment #51812, ROCm
+KV-first attention blocks page fix #51837). d0 benchmark and depth sweep:
+
+| model       |   test |            t/s |     peak t/s |  e2e_ttft (ms) |
+|:------------|-------:|---------------:|-------------:|---------------:|
+| qwen3.8-27b | pp2048 |  2632.18 ± 13.50 |            |     780.85 ± 4.18 |
+| qwen3.8-27b |   tg32 |    72.13 ± 3.56 | 74.46 ± 3.67 |                |
+| qwen3.8-27b |  tg128 |    65.26 ± 6.08 | 73.33 ± 7.76 |                |
+
+| depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
+|------:|-------------:|-----------:|-------------:|
+| 4096  |     2796.73 |     60.07 |          2.20 |
+| 8192  |     2756.66 |     61.10 |          3.72 |
+| 16384 |     2704.39 |     62.44 |          6.82 |
+| 32768 |     2591.25 |     57.81 |         13.44 |
+| 65536 |     2370.84 |     45.70 |         28.51 |
+| 128000|     2035.60 |     48.02 |         63.90 |
+
+Prefill and TTFT match the 08-18 sweep to within ~1%, so the cherry-picks add
+no throughput regression. Decode is flat-to-better through d32K (60–62 vs
+55–60) with tg32 up ~21% at d0 (72.1 vs 59.7); the single d64K point is a
+2-run-sample outlier. Coherence test passed throughout — no token loops,
+garbage, or NaN corruption on the hybrid GDN path. Full tables in
+[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md).
 
 ### Long-context concurrency
 
