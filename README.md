@@ -425,8 +425,12 @@ no throughput regression. Decode is flat-to-better through d32K (60–62 vs
 2-run-sample outlier. Coherence test passed throughout — no token loops,
 garbage, or NaN corruption on the hybrid GDN path. After the third patch
 (#48375) was added and the server restarted, a fresh d0 bench confirmed no
-regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). Full tables in
-[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md).
+regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). A later d0 re-bench the
+same day landed pp2048 at 3236/3285 (best TTFT seen, 626-635 ms) with tg32/tg128
+at 70.2/68.8 — attributed to run variance / less contended GPU state rather than
+a code change, since no stack change occurred between runs. Full tables in
+[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md)
+and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md).
 
 **Deep-context probe (d200K/d256K, 2026-08-19):** run to stress the fp8-KV
 scale-1.0 config against #52793 (see watchlist). Both rows passed the
