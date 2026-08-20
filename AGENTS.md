@@ -133,7 +133,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766 40707; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766 40707 52527 52789 48815 52817; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -189,7 +189,23 @@ touches one of:
   - `#51250` prefix caching is a silent no-op on GDN hybrid (same family as
     `#45238`)
   - `#52520` align-mode admission livelock near KV-pool ceiling (open)
-  - `#45238` hybrid prefix caching drops to 0% in align mode (open)
+  - `#45238` hybrid prefix caching drops to 0% in align mode (open) — the
+    binding constraint on this stack. Root cause in v0.27.1:
+    `BlockPool.cache_full_blocks` skips Mamba align-mode null blocks
+    (block_pool.py, "Mamba models with prefix-caching in align mode"), so only
+    ~1 checkpoint hash per request is registered; a missing Mamba checkpoint
+    vetoes all attention-group hits (every group must hit). Live geometry:
+    `block_size=1600` (see `vllm:cache_config_info`), so hits are 0% whenever
+    `floor((prompt_len-1)/1600)*1600 > shared_prefix_len` — measured **0% on
+    the qwen3.8-27b multi-turn probe (2026-08-20)**. Fix in flight, none
+    merged: `#52527` (metrics for shared-prefix tokens lost to missing
+    checkpoints), `#52789` (internal prefill checkpoints, 9–25% TTFT),
+    `#48815` (MTP align retention). **When one merges**: carry it as a local
+    patch only if the current `VLLM_REF` release does not already contain it —
+    if it's in an available vLLM bump, prefer the bump (step 5), not a patch.
+  - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
+    prefix hit (1600 tokens here), bounding the prefix-cache win for MTP even
+    after `#45238` is fixed. Monitor for a merged implementation.
   - `#51562` GDN metadata misclassifies stateless first chunk (open)
   - `#51766` Mamba running CoW after external hits (only w/ KV connectors)
   - `#40707` hybrid Mamba scheduling deadlock with 2+ large images in one
@@ -237,4 +253,9 @@ applied at build time. Before bumping any pin:
    `just down && just up`. No rebuild or cache clearing needed.
 6. `just clear-vllm-caches && just rebuild && just up`, then `just bench` to
    confirm no regression vs `README.md`/`benchmarks/` baselines.
-7. Update `README.md` (patches, pins, bench tables) and commit to `origin`.
+7. Re-run the prefix-cache hit-rate probe (`benchmarks/prefix_cache_probe.py`)
+   after any vLLM bump/restart and record whether
+   `vllm:prefix_cache_hits_total` moves off 0% (see `#45238`). A non-zero hit
+   rate on the multi-turn probe is the signal the align-mode checkpoint fix
+   landed and is worth carrying/keeping.
+8. Update `README.md` (patches, pins, bench tables) and commit to `origin`.

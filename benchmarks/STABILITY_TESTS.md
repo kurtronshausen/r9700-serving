@@ -365,6 +365,31 @@ is now 0.27.1):
 - All outputs were structured, coherent, and ended with varied conclusions — no
   garbage or token loops.
 
+## Prefix-cache hit-rate probe (hybrid GDN)
+
+Checks whether `--enable-prefix-caching` actually reuses KV across multi-turn
+conversations. Hybrid GDN models run `mamba_cache_mode=align` by default, where
+prefix caching is currently broken (vllm-project/vllm#45238): hits stay at 0%
+whenever the align-mode Mamba checkpoint lands in request-unique tokens.
+
+```sh
+just exec python /home/philip/r9700-serving/benchmarks/prefix_cache_probe.py [model] [turns]
+```
+
+Reports per-turn `vllm:prefix_cache_queries_total` / `hits_total` deltas, the
+live cache geometry (`block_size`, `mamba_cache_mode` from
+`vllm:cache_config_info`), and a final coherence check (the model must retain
+a secret planted in turn 1).
+
+**Interpretation.** Trigger condition with the observed `block_size=1600`:
+`floor((prompt_len-1)/1600)*1600 > shared_prefix_len` → 0% hits. A **non-zero
+hit rate** on this probe is the signal the align-mode checkpoint fix landed
+upstream and is worth carrying/keeping (see AGENTS.md watchlist `#45238`).
+Record the result after every vLLM bump/restart.
+
+**Baseline** (qwen3.8-27b, vLLM 0.27.1 + patches, 2026-08-20): 0% hits across
+all 4 turns (`queries` climbing, `hits=0`), coherence PASS.
+
 ## What counts as a failure
 
 | symptom | meaning |
