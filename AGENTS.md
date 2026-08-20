@@ -112,10 +112,18 @@ git ls-remote https://github.com/ROCm/flash-attention.git HEAD
 
 # ROCm base image — current ROCM_IMAGE=rocm/dev-ubuntu-24.04:7.14.0-full
 curl -s "https://hub.docker.com/v2/repositories/rocm/dev-ubuntu-24.04/tags?page_size=100&name=7.1" | jq -r '.results[].name' | sort -V | tail
+
+# Froggeric chat template — current pin is the first line of chat-templates/qwen.jinja
+# (template_version = "qwen3.8-froggeric-vXX.X"). Compare against upstream main:
+curl -sL https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja | head -1
+head -1 chat-templates/qwen.jinja
 ```
 
 Report what's newer than the current pins and whether the bump is worth it
-(see relevance filters below). Do **not** auto-bump pins.
+(see relevance filters below). Do **not** auto-bump pins. Chat-template bumps
+are lower-risk than build pins: it's a pure Jinja swap, no rebuild — refresh
+`chat-templates/qwen.jinja`, bump the README pin note, `just down && just up`
+(the in-memory prefix cache is cleared on restart anyway).
 
 ### 2. Scan for open issues affecting this setup
 
@@ -125,7 +133,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766 40707; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -158,6 +166,12 @@ touches one of:
   Qwen3.8-27B (hybrid GDN, MTP3, 256K context, fp8 KV). Anything touching:
   hybrid Mamba/GDN models, MTP/speculative decoding, prefix caching
   (align mamba cache mode), fp8 KV, or `ROCM_AITER_UNIFIED_ATTN` is in scope.
+- **Chat template**: froggeric `chat-templates/qwen.jinja` (pinned, e.g.
+  v22.3). A newer version matters when it changes prompt rendering in ways
+  this stack hits: history re-render must stay byte-identical to generated
+  tokens (KV-cache/prefix-cache invariance) for thinking-off multi-turn,
+  tool-argument formatting for the `qwen3_coder` XML parser, or reasoning/
+  tool-error heuristics. Template bumps need no rebuild (see step 1).
 - **Known-bug watchlist** (search/check these before recommending a vLLM bump):
   - `#35288` MTP concurrency corruption (still mitigated by `max-num-seqs 2`)
   - `#47087` MTP token loops on Qwen3-MoE (resolved by #51113, in v0.27.1 —
@@ -178,6 +192,12 @@ touches one of:
   - `#45238` hybrid prefix caching drops to 0% in align mode (open)
   - `#51562` GDN metadata misclassifies stateless first chunk (open)
   - `#51766` Mamba running CoW after external hits (only w/ KV connectors)
+  - `#40707` hybrid Mamba scheduling deadlock with 2+ large images in one
+    prompt (align block-split collapses to 0 → request hangs forever, engine
+    never recovers). Reachable here: all profiles pass
+    `--limit-mm-per-prompt image: 99` and both 27B models are this GDN hybrid.
+    Fix PR `#40709` is **not merged** (absent from v0.27.1). Only workaround
+    is avoiding 2+ large (~11.8K vision-token) images in a single request.
 
 Issues known **not** to apply (checked; re-check only if the stack changes):
 NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
@@ -212,6 +232,9 @@ applied at build time. Before bumping any pin:
 3. Check `TORCH_VERSION`/`TORCHVISION_VERSION` against the vLLM release's
    supported ROCm/PyTorch stack.
 4. Re-check the patch watchlist (step 2/3) and drop/rebase local patches.
-5. `just clear-vllm-caches && just rebuild && just up`, then `just bench` to
+5. Refresh `chat-templates/qwen.jinja` if froggeric shipped a newer version
+   (step 1): curl from upstream `main`, bump the README pin note, then
+   `just down && just up`. No rebuild or cache clearing needed.
+6. `just clear-vllm-caches && just rebuild && just up`, then `just bench` to
    confirm no regression vs `README.md`/`benchmarks/` baselines.
-6. Update `README.md` (patches, pins, bench tables) and commit to `origin`.
+7. Update `README.md` (patches, pins, bench tables) and commit to `origin`.

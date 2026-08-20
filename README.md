@@ -80,7 +80,7 @@ Runtime environment is split across files:
 ### Chat template
 
 All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
-(`chat-templates/qwen.jinja`, pinned to **v22.1** — `qwen3.8-froggeric-v22.1`,
+(`chat-templates/qwen.jinja`, pinned to **v22.3** — `qwen3.8-froggeric-v22.3`,
 fetched from the repo's `main`). It is applied to every model via
 `--chat-template` in `compose.yaml`, overriding each model's bundled template.
 The template fixes rendering bugs, KV-cache invalidation, token waste, and
@@ -90,12 +90,23 @@ warnings plus optional `tool_call_format="json"` / reasoning-effort steering
 and the final answer into `content`; `--reasoning-parser qwen3` (see below) is
 required for the split to work.
 
-Refresh the overlay from upstream when a newer version ships:
+Since **v22.3**, history re-rendering is byte-identical to generated tokens for
+thinking-off turns (past ` thinking` blocks are always preserved, even when
+empty), which keeps `--enable-prefix-caching` hits intact across multi-turn
+conversations — this stack runs thinking-off by default.
+
+Refresh the overlay from upstream when a newer version ships (compare the
+`template_version` line of `chat-templates/qwen.jinja` against the repo's
+`main`):
 
 ```sh
 curl -L -o chat-templates/qwen.jinja \
   https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja
 ```
+
+Template bumps need no image rebuild: after refreshing, bump the pin note
+above and `just down && just up` (the in-memory prefix cache is cleared on
+restart anyway).
 
 [froggeric's Qwen-Fixed-Chat-Templates]: https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 
