@@ -9,11 +9,25 @@ OpenAI-compatible API.
 - Docker with the Compose plugin (`docker compose`), or Podman (`podman
   compose`); `just` recipes default to Docker
 - [`just`](https://just.systems/)
+- [`git`](https://git-scm.com/) (to fetch the source)
 - SELinux hosts need no special relabeling: bind mounts mount unlabeled because
   the container runs with `label=disable`
 - One or more R9700 GPUs; the included configuration assumes two
 
 ## Quick start
+
+Get the source (skip if you already have the repo checked out):
+
+```sh
+# Install git if you don't have it (Debian/Ubuntu: apt install git,
+# Fedora: dnf install git, Arch: pacman -S git)
+git clone https://github.com/prcoe1/r9700-serving.git
+cd r9700-serving
+```
+
+(`git clone` downloads a full copy of the repository, including its version
+history, into a new `r9700-serving/` directory; `cd` then moves into it. All
+commands below run from inside that directory.)
 
 ```sh
 cp .env.example .env  # Build version pins + default model profile (untracked)
