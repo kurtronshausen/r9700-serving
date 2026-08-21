@@ -65,14 +65,14 @@ host render group gid for `/dev/dri` access — check with `getent group render`
 |:-------------|:--------|
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
 | PyTorch      | 2.13.0+rocm7.14.0 |
-| vLLM         | 0.27.1 |
+| vLLM         | 0.28.0rc2 |
 | AITER        | v0.1.20 |
 | Flash Attention | @ 1cc7ff67 |
 
 ROCm 7.14 is on AMDs "TheRock" technology-preview stream (7.9/7.13/7.14); the
 production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.20` is the
-latest tagged release; vLLM is the 0.27.1 release since `gfx1201`
-requires source builds.
+latest tagged release; vLLM is the 0.28.0rc2 prerelease (latest stable is
+0.27.1) since `gfx1201` requires source builds.
 
 The default (active) model is `Qwen/Qwen3.8-27B-FP8` (`qwen3.8-27b`, the
 newest dense 27B hybrid linear/full-attention architecture, MTP trained,
@@ -162,7 +162,7 @@ Version-locked patches applied at runtime by read-only bind-mounts in
 the pinned dependency.
 
 - **Tolerate empty `tools` arrays** (`patches/vllm/protocol.py`, pinned to
-  `VLLM_REF` v0.27.1): some clients send `{"tools": [], "tool_choice": "none"}`
+  `VLLM_REF` v0.28.0rc2): some clients send `{"tools": [], "tool_choice": "none"}`
   on chat completions, which upstream vLLM's `check_tool_usage` rejects with a
   400 (it treats any empty tools array as malformed, even when `tool_choice` is
   `"none"`). The overlay of
@@ -173,37 +173,19 @@ the pinned dependency.
 
 ### Source-build patches (applied at image build time)
 
-Cherry-picks of upstream fixes merged to `main` after `VLLM_REF` v0.27.1.
-Applied by `Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the
-aiter patch loop). Verified to apply cleanly on the v0.27.1 tree; re-verify
-when bumping `VLLM_REF`.
+Local backport of an upstream fix not in `VLLM_REF` v0.28.0rc2. Applied by
+`Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the aiter patch
+loop). Verified to apply cleanly on the v0.28.0rc2 tree; re-verify when
+bumping `VLLM_REF`.
 
-- **Align Qwen GDN gates with speculative tokens**
-  (`patches/vllm/51812-gdn-spec-gate-align.patch`,
-  [#51812](https://github.com/vllm-project/vllm/pull/51812)): in a mixed
-  prefill/decode batch the GDN `a`/`b` gates were gathered with full-batch
-  indices while `mixed_qkv` used spec/non-spec-split indices, so speculative
-  tokens could consume another request's gates. Measured upstream on
-  Qwen3.8-27B with MTP3 + prefix caching. Fixes correctness of MTP on the
-  dense GDN profiles (Qwen3.6-27B, Qwen3.8-27B).
-- **ROCm KV-first attention blocks share a page with Mamba state**
-  (`patches/vllm/51837-rocm-kv-first-mamba-pages.patch`,
-  [#51837](https://github.com/vllm-project/vllm/pull/51837)): with ROCm's
-  `(2, num_blocks, ...)` KV layout, block `b` spans half of two pages while
-  Mamba addresses its state by page, so hybrid-model attention blocks and
-  Mamba/GDN state pages alias the same bytes (silent NaN corruption, GSM8K
-  0.20 vs 0.95 upstream). Fix lays KV-first views out page-first when the
-  allocation is shared with Mamba. Protects the hybrid Qwen3.8-27B GDN path
-  on ROCm; not observed on gfx1201, kept as insurance. **Inert on this
-  stack**: the fix only fires for KV-first backends (`block_dim != 0`), but
-  all attention layers here use `ROCM_AITER_UNIFIED_ATTN`, which is
-  blocks-first (`get_kv_cache_block_dim() == 0`) — the new reshape branch is
-  never taken. It only starts to matter if a KV-first backend (e.g. ROCm
-  flash-attn / `ROCM_ATTN`) is ever selected.
+(#51812 GDN spec-gate alignment and #51837 ROCm KV-first page separation were
+carried as patches on v0.27.1; both merged upstream 2026-08-11 and are in
+v0.28.0rc2, so their patches were dropped with the bump.)
+
 - **Honor `drop_eagle_block` in `MambaManager`**
   (`patches/vllm/48375-mamba-drop-eagle-block.patch`,
   [#48375](https://github.com/vllm-project/vllm/pull/48375), adapted for
-  v0.27.1): `MambaManager.find_longest_cache_hit` accepted `drop_eagle_block`
+  v0.28.0rc2): `MambaManager.find_longest_cache_hit` accepted `drop_eagle_block`
   and ignored it, so on hybrid GDN models with MTP/EAGLE + prefix caching the
   final matched page of a cache hit could hold recurrent state written over
   draft positions that verification later rejects — silent corruption that
@@ -298,8 +280,8 @@ stale triage snapshots live in
 
 ## Performance
 
-Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.27.1 +
-the local patches under "Source-build patches", torch 2.13, triton 3.8.0
+Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
+the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
 current default stack (fp8 KV, MTP3, 256K context). The other rows are the
 latest available measurements for those profiles (2026-08-12, pre-patch
@@ -309,7 +291,7 @@ Full methodology, per-run files, and upgrade history in
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
-| Qwen3.8-27B-FP8 (default, 2026-08-19) | MTP3 | fp8 |    2632 |   **72.1** |    65.3 |
+| Qwen3.8-27B-FP8 (default, 2026-08-21) | MTP3 | fp8 |    2653 |   **65.6** |    70.1 |
 | Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 

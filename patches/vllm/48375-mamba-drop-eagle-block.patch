@@ -3,9 +3,10 @@ From: OpenCode <opencode@localhost>
 Date: Wed, 19 Aug 2026 09:00:00 +0000
 Subject: [PATCH] [BugFix] Honor drop_eagle_block in MambaManager (#48375)
 
-Adapted for VLLM_REF=v0.27.1. Upstream PR #48375 (still open upstream as of
-2026-08-19) against vllm main; the hunk context is identical in v0.27.1's
-`MambaManager.find_longest_cache_hit` (vllm/v1/core/single_type_kv_cache_manager.py).
+Adapted for VLLM_REF=v0.28.0rc2. Upstream PR #48375 (still open upstream as of
+2026-08-21) against vllm main; verified `git apply --check` clean on the
+v0.28.0rc2 tree's `MambaManager.find_longest_cache_hit`
+(vllm/v1/core/single_type_kv_cache_manager.py).
 
 On a hybrid model (full-attention + Mamba/GDN layers, e.g. Qwen3.6-27B,
 Qwen3.8-27B), enabling MTP/EAGLE speculative decoding together with prefix

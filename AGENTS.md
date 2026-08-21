@@ -101,7 +101,7 @@ that affect this GPU setup and model combo** before recommending a bump.
 ### 1. Upstream release state
 
 ```sh
-# vLLM — current pin VLLM_REF=v0.27.1
+# vLLM — current pin VLLM_REF=v0.28.0rc2
 gh release list -R vllm-project/vllm --limit 8
 
 # AITER — current pin AITER_REF=v0.1.20
@@ -179,14 +179,14 @@ touches one of:
   - `#35288` MTP concurrency corruption (still mitigated by `max-num-seqs 2`)
   - `#47087` MTP token loops on Qwen3-MoE (resolved by #51113, in v0.27.1 —
     pending 35B MTP re-test)
-  - `#51812` Qwen GDN gate/spec-token alignment — **carried as a local patch**.
-    PR merged upstream 2026-08-11 (`5af7c8d`) but **absent from v0.27.1**;
-    drop the patch once a `VLLM_REF` containing it is in use
+  - `#51812` Qwen GDN gate/spec-token alignment — **resolved**: merged
+    upstream 2026-08-11 (`5af7c8d`), present in v0.28.0rc2; local patch
+    dropped 2026-08-21
   - `#51837` ROCm KV-first attention blocks sharing pages with Mamba —
-    **carried as a local patch** (inert on this stack: AITER unified attn is
-    blocks-first, `block_dim == 0`, so the fix's branch never fires; only
-    matters if a KV-first backend is ever selected). PR merged upstream
-    2026-08-11 (`3e372c5`), also **absent from v0.27.1**
+    **resolved**: merged upstream 2026-08-11 (`3e372c5`), present in
+    v0.28.0rc2; local patch dropped 2026-08-21. Inert on this stack (AITER
+    unified attn is blocks-first, `block_dim == 0`); only matters if a
+    KV-first backend is ever selected
   - `#48375` MambaManager ignores `drop_eagle_block` (MTP + prefix caching
     corrupts hybrid recurrent state, #43559/#50188) — **carried as a local patch**
   - `#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
@@ -219,7 +219,7 @@ touches one of:
     prompt (align block-split collapses to 0 → request hangs forever, engine
     never recovers). Reachable here: all profiles pass
     `--limit-mm-per-prompt image: 99` and both 27B models are this GDN hybrid.
-    Fix PR `#40709` is **not merged** (absent from v0.27.1). Only workaround
+    Fix PR `#40709` is **not merged** (absent from v0.28.0rc2). Only workaround
     is avoiding 2+ large (~11.8K vision-token) images in a single request.
 
 Issues known **not** to apply (checked; re-check only if the stack changes):
