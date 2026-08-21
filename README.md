@@ -125,18 +125,21 @@ restart anyway).
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
   **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
-  (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on the MTP profiles
-  to stay below the #35288 corruption threshold (see "MTP concurrency bug").
+  (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on all Qwen
+  profiles to stay below the #35288 corruption threshold (see "MTP concurrency
+  bug").
 - **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
   the default across all Qwen profiles — it halves KV-cache memory (enabling
   the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
   deep-context decode up (see depth sweep below). For BF16 KV, set
   `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
-  (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
-  and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
-  MTP token loops (see "Archived issues"), not the patch.
+   (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
+   and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
+   MTP token loops (see [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the
+   patch.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on the dense profiles; disabled on 35B, see "Archived issues").
+  (MTP4 on Qwen3.6-27B, MTP3 on Qwen3.8-27B; disabled on 35B-A3B — see
+  [`archive/DEADENDS.md`](archive/DEADENDS.md)).
 
 ### Runtime overlays (bind-mounted source fixes)
 
@@ -224,11 +227,12 @@ only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 
 Key tuning decisions:
 - **MTP speculative decoding** (dense profiles): MTP4 on Qwen3.6-27B (~72%
-  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 59.7 on the
+  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 72.1 on the
   current fp8-KV stack; bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4
   49.2, no-MTP 32.0) because its MTP head accepts drafts poorly past position 3,
   so more drafts waste compute and fewer lose throughput. MTP is **disabled on
-  35B-A3B** — see "Archived issues".
+  35B-A3B** (pending a re-test after the upstream #47087 fix — see
+  [`archive/DEADENDS.md`](archive/DEADENDS.md)).
 - **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
   throughput regression on RDNA4 — one queue per process avoids kernel launch
   scheduling overhead.
@@ -268,156 +272,36 @@ never forms a ≥4-sequence decode batch — concurrent decode stays below the
 corruption threshold regardless of incoming concurrency. Verified with the
 #35288 repro (4/6/8 concurrent requests → all coherent) and the 400-request
 stress test. Dense MTP stays enabled (MTP4 on Qwen3.6-27B, MTP3 on
-Qwen3.8-27B); 35B-A3B runs MTP disabled — see archived issues below.
+Qwen3.8-27B); 35B-A3B runs MTP disabled.
 
-### Upstream watchlist
+### Upstream issues
 
-Open upstream issues that touch this stack (checked 2026-08-19; see also the
-`AGENTS.md` update-check workflow, which keeps this list fresh):
-
-- **`#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
-  also sizes the CUDA-graph pool** ([#52872](https://github.com/vllm-project/vllm/issues/52872),
-  open): the startup memory profile under-predicts large-prefill activation
-  peak on hybrid GDN, and lowering `--max-num-batched-tokens` frees memory
-  twice (activation + CUDA-graph pool, ~10% context). Relevant to the
-  `VLLM_MAX_BATCHED_TOKENS=4096` cap on 35B-A3B.
-- **`#47602` MTP acceptance rate decays with context length**
-  ([#47602](https://github.com/vllm-project/vllm/issues/47602), open, on
-  Qwen3.6-27B): draft acceptance falls with total context, so long-context MTP
-  can regress vs no-MTP; no length-gating knob for `num_speculative_tokens`.
-- **`#51250` prefix caching is a silent no-op on GDN hybrid**
-  ([#51250](https://github.com/vllm-project/vllm/issues/51250), open): 0% APC
-  hits on Qwen3.6-35B-A3B because recurrent state has no APC entry. Same family
-  as tracked `#45238`.
-- **`#45238`** hybrid prefix caching drops to 0% in align mode (open),
-  **`#52520`** align-mode admission livelock near the KV-pool ceiling (open),
-  **`#51562`** GDN metadata misclassifies a stateless first chunk as decode
-  (open, no fix yet).
-
-### Known to ignore (checked, not applicable to this stack)
-
-Issues verified out of scope on 2026-08-19; re-check only if the stack changes
-(platform, model, or a knob flips):
-
-- **`#52475`** MTP repetition collapse with turboquant KV — NVIDIA sm120 KV
-  quant; this stack is ROCm gfx1201 with standard fp8/bfloat16 KV.
-- **`#52480`** `qwen3_5_mtp` fails at TP≥2 — Qwen3.5 drafter, not the Qwen3.6/3.8
-  MTP heads used here.
-- **`#52583`** prefix caching hangs on Qwen3.8-**VL** multimodal inputs — this
-  stack serves text-only Qwen3.8-27B (`--limit-mm-per-prompt` has no image
-  path).
-- **`#51752`** hybrid block-size alignment skipped on PP ranks — this stack is
-  TP2, no pipeline parallelism.
-- **`#51530`** DeepSeek-V4 sparse indexer on ROCm, **`#51957`** AITER FP8 BMM
-  with DP attention, **`#40017`** NIXL P/D disaggregation, **`#51805`**/
-  **`#51766`** KV-connector paths — all require connectors, DP, DSpark, or
-  disaggregation this stack does not use.
-- **`#51971`** Qwen3 MoE GPTQ `qzeros` on gfx1201 — GPTQ path; profiles use FP8
-  / BF16 checkpoints.
-- **`#51571`** async MTP align accepted-count race — async scheduling is
-  auto-disabled for MTP (`config/vllm.py:1108`), unreachable here.
-- **`#52793`** fp8 KV on hybrid models falls back to scale 1.0 — **verified
-  non-issue on this stack** (2026-08-19): Qwen3.8-27B-FP8 indeed runs fp8 KV
-  at scale 1.0 (no `k/v_scale` in the checkpoint; `--calculate-kv-scales`
-  deprecated in v0.27.1), but a d200K/d256K probe passed coherence at 258k
-  total tokens with clean logs and monotonic decode decay — the K/V
-  magnitudes fit fp8-e4m3 without a learned scale. Re-check only if a model
-  with larger K/V dynamic range or a different fp8-KV profile is added.
-- **`#52312`** BF16 MLA with `ROCM_AITER_FA` on gfx950, **`#52833`**/**`#48568`**
-  GLM-5.2 MTP on MI-series — different GPU/model combo than gfx1201 + Qwen.
-
-### Archived issues
-
-Resolved upstream or superseded; kept for reference.
-
-- **MTP token loops on Qwen3-MoE** ([#47087](https://github.com/vllm-project/vllm/issues/47087)):
-  deep agentic conversations on Qwen3-MoE degenerated into garbled token loops.
-  **Resolved upstream by #51113 (in v0.27.1).** MTP remains disabled on 35B-A3B
-  (`VLLM_SPEC_DECODE=` empty) pending a re-test of MTP on that profile, which
-  would recover ~185 tg32 (MTP4) vs ~83 tg32 (no MTP).
-
-## Dead ends
-
-- **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
-  upstream AITER adds RDNA4 support.
-- **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
-  the 35B-A3B (tg32 160-175 vs ~181-191, tg128 135-137 vs ~146) with flat
-  prefill. EP's AllToAll doesn't pay off for a 3B-active MoE at tp=2. Skip at
-  this scale; revisit only for much larger active-parameter MoEs.
+The live upstream-issue watchlist, the known-to-ignore list, and the update-check
+workflow (pin bumps, patch re-verification, triage filters) are maintained in
+`AGENTS.md` ("Checking for Updates"). Resolved/superseded issues, dead ends, and
+stale triage snapshots live in
+[`archive/DEADENDS.md`](archive/DEADENDS.md).
 
 ## Performance
 
-Measured on 2× R9700, tuned MOE/dense configs, single request, vLLM 0.27.0,
-torch 2.13, triton 3.8.0+git (ROCm 7.14.0). The 0.27.0 → 0.27.1 bump is a
-packaging/pin update; the source-build pin is now 0.27.1 (see Configuration).
-KV dtype per row is as labeled; the **current default stack is fp8 KV**
-(`VLLM_KV_CACHE_DTYPE=fp8`). MTP4 is enabled for Qwen3.6-27B, MTP3 for
-Qwen3.8-27B; disabled for 35B-A3B (see "MTP concurrency bug" and "Archived
-issues"). The Qwen3.8-27B row below is the current default stack (fp8 KV + tuned
-dense, MTP3, 256K context, froggeric chat template, thinking off).
+Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.27.1 +
+the local patches under "Source-build patches", torch 2.13, triton 3.8.0
+(ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
+current default stack (fp8 KV, MTP3, 256K context). The other rows are the
+latest available measurements for those profiles (2026-08-12, pre-patch
+build; ² the 27B profile defaults to fp8 KV today, this run used bf16).
+Full methodology, per-run files, and upgrade history in
+[`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
-| model                           | MTP (draft #)      | pp2048 t/s | tg32 t/s | tg128 t/s |
-|:--------------------------------|:-------------------|-----------:|---------:|----------:|
-| Qwen3.6-27B (Andy & upstream baseline) | MTP3, fp8 KV |     2750 |    81.9 |    —     |
-| Qwen3.6-27B-FP8 (v0.26)         | MTP4, fp8 KV       |    ~2927 |     ~75 |    ~66   |
-| Qwen3.6-27B-FP8 (v0.27)         | MTP4, fp8 KV       |    ~2916 |     ~87 |    ~76   |
-| Qwen3.6-35B-A3B-FP8 (v0.26)     | MTP4, fp8 KV       | ~10864 |    ~182 |   ~144   |
-| Qwen3.6-35B-A3B-FP8 (v0.27)     | MTP4, fp8 KV       | ~11143 |    ~189 |   ~151   |
-| Qwen3.6-35B-A3B-BF16+MoETuned+MtPOff | MTP off       | ~8788 |   ~87.8 |   ~87.1  |
-| Qwen3.6-35B-A3B-BF16+MoETuned+DenseTuned+MtPOff | MTP off, tuned dense | ~8510 |  **91.0** |  **91.3** |
-| Qwen3.6-27B-BF16+MTP4           | MTP4, bf16 KV       |    ~2471 |   ~80.6 |   ~63.7  |
-| Qwen3.6-27B-BF16+MTP4+DenseTuned | MTP4, bf16 KV, tuned dense | ~2500 |  **90.8** |   ~69  |
-| Qwen3.8-27B-FP8 (fp8 KV, MTP3, tuned dense) | MTP3, fp8 KV | ~2633–2661 | **59.7** | **68.8** |
+| model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
+|:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
+| Qwen3.8-27B-FP8 (default, 2026-08-19) | MTP3 | fp8 |    2632 |   **72.1** |    65.3 |
+| Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
+| Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 
-Full methodology, depth sweeps, and tuning history in
-[`BENCHMARKS.md`](BENCHMARKS.md).
+### Depth sweep (Qwen3.8-27B-FP8, current default stack, 2026-08-19)
 
-### Depth sweep (35B-A3B, MTP off, tuned dense vs stock)
-
-Deep-context decode is dominated by attention over the cached KV, so the GEMM
-tuning benefit narrows with depth. Same-boot A/B (bf16 KV, tuned MoE, thinking
-off):
-
-| depth | stock tg32 | +tuned dense tg32 | uplift |
-|------:|-----------:|------------------:|:------|
-| 0     | 86.8 | **90.3** | +4% |
-| 4096  | 86.8 | **91.4** | +5% |
-| 65536 | 78.2 | **79.1** | +1% |
-| 128000| 71.4 | **72.3** | +1% |
-
-### Depth sweep (Qwen3.8-27B-FP8, fp8 KV, MTP3, 2026-08-18)
-
-Current default stack (fp8 KV + MTP3 + 256K max-model-len), full-context
-prefill at depth:
-
-| depth | ctx_pp t/s | tg32 t/s | e2e TTFT (s) |
-|------:|-----------:|---------:|-------------:|
-| 4096  |     2827 |     55.2 |           2.2 |
-| 8192  |     2768 |     55.5 |           3.7 |
-| 16384 |     2703 |     59.6 |           6.8 |
-| 32768 |     2589 |     57.3 |          13.4 |
-| 65536 |     2373 |     51.8 |          28.5 |
-| 128000|     2038 |     46.5 |          63.8 |
-
-Decode holds ~55–60 t/s to d32K and falls to 46.5 t/s at d128K (−22% vs d8K),
-against the 59.7 t/s d0 baseline, with fp8 KV's halved K/V bytes offsetting
-the growing attention span. Full-context prefill degrades −28% (2827 → 2038
-t/s) and e2e TTFT scales linearly to 63.8 s at d128K. See
-[`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md)
-and the d0 reference [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md).
-
-### Patched build (v0.27.1 + #51812 + #51837 + #48375, 2026-08-19)
-
-Same default stack with the three source-build cherry-picks described under
-"Source-build patches" above (Qwen GDN gate/spec-token alignment #51812, ROCm
-KV-first attention blocks page fix #51837, MambaManager honors `drop_eagle_block`
-#48375). d0 benchmark and depth sweep (below), then a post-#48375 re-bench:
-
-| model       |   test |            t/s |     peak t/s |  e2e_ttft (ms) |
-|:------------|-------:|---------------:|-------------:|---------------:|
-| qwen3.8-27b | pp2048 |  2632.18 ± 13.50 |            |     780.85 ± 4.18 |
-| qwen3.8-27b |   tg32 |    72.13 ± 3.56 | 74.46 ± 3.67 |                |
-| qwen3.8-27b |  tg128 |    65.26 ± 6.08 | 73.33 ± 7.76 |                |
+fp8 KV + MTP3 + 256K max-model-len, full-context prefill at depth:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|
@@ -430,40 +314,37 @@ KV-first attention blocks page fix #51837, MambaManager honors `drop_eagle_block
 | 200000|     1743.31 |     35.60 |        115.91 |
 | 256000|     1562.51 |     33.81 |        165.17 |
 
-Prefill and TTFT match the 08-18 sweep to within ~1%, so the cherry-picks add
-no throughput regression. Decode is flat-to-better through d32K (60–62 vs
-55–60) with tg32 up ~21% at d0 (72.1 vs 59.7); the single d64K point is a
-2-run-sample outlier. Coherence test passed throughout — no token loops,
-garbage, or NaN corruption on the hybrid GDN path. After the third patch
-(#48375) was added and the server restarted, a fresh d0 bench confirmed no
-regression (pp2048 2615/2722, tg32 63.5, tg128 69.3). A later d0 re-bench the
-same day landed pp2048 at 3236/3285 (best TTFT seen, 626-635 ms) with tg32/tg128
-at 70.2/68.8 — attributed to run variance / less contended GPU state rather than
-a code change, since no stack change occurred between runs. A same-day depth
-re-sweep (d4K–d128K) reproduced the morning table within ~1% on prefill and
-TTFT (2827→2034 t/s, 2.17→63.95 s) with decode 50–60 t/s through d32K decaying
-to 41.2 t/s at d128K — no regression from the patches. Full tables in
+Decode holds 57–62 t/s to d32K, then falls to 33.8 t/s at d256K as the
+attention span grows (fp8 KV's halved K/V bytes offset it partly);
+full-context prefill degrades 2797 → 1563 t/s and e2e TTFT scales roughly
+linearly to 165 s at d256K. The d200K/d256K rows doubled as a coherence
+probe: no NaN/corruption/worker death at 258k total tokens (right at the
+262144 window limit) — the scale-1.0 fp8 KV config holds up at max context.
+Full tables in
 [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md),
 [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md),
 and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md).
 
-**Deep-context probe (d200K/d256K, 2026-08-19):** run to stress the fp8-KV
-scale-1.0 config against #52793 (see watchlist). Both rows passed the
-coherence test with no NaN/corruption/worker death at 258k total tokens —
-right at the 262144 window limit — and decode/prefill decay monotonically
-(48 → 35.6 → 33.8 tg32; 2035 → 1743 → 1562 pp t/s). Scale-1.0 fp8 KV holds up
-at max context on this model.
+### Depth sweep (35B-A3B, MTP off, tuned dense vs stock)
 
-Also noted this cycle: **#47087 (MTP token loops on Qwen3-MoE) is resolved
-upstream by #51113** (already in v0.27.1); the 35B-A3B profile still runs MTP
-disabled pending a re-test, which would recover ~185 tg32 (MTP4) vs ~83 tg32
-(no MTP).
+Deep-context decode is dominated by attention over the cached KV, so the GEMM
+tuning benefit narrows with depth. Same-boot A/B (bf16 KV, tuned MoE, thinking
+off); full sweep in
+[`benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md`](benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md):
+
+| depth | stock tg32 | +tuned dense tg32 | uplift |
+|------:|-----------:|------------------:|:------|
+| 0     | 86.8 | **90.3** | +4% |
+| 4096  | 86.8 | **91.4** | +5% |
+| 65536 | 78.2 | **79.1** | +1% |
+| 128000| 71.4 | **72.3** | +1% |
 
 ### Long-context concurrency
 
 Decode cost is dominated by attending over the cached KV, so concurrent
-deep-context requests degrade sharply. The table below was measured on 35B-A3B
-(BF16 KV + tuned MOE, tg32, MTP disabled).
+deep-context requests degrade sharply. Measured on 35B-A3B (BF16 KV + tuned
+MOE, tg32, MTP disabled); per-run tables in
+[`archive/benchmarks/08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md`](archive/benchmarks/08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md).
 `c2 total` = aggregate across 2 concurrent requests, `c2/req` = per request.
 
 | depth | c1 | c2 total | c2/req |
@@ -473,16 +354,16 @@ deep-context requests degrade sharply. The table below was measured on 35B-A3B
 | d32000| 176 |       77 |     97 |
 | d64000| 171 |       47 |     77 |
 
-The server runs at **c1 (`--max-num-seqs 1`)**, which a head-to-head confirms
-is the most efficient long-context setup: two concurrent requests (c2 total,
-geomean ~95 t/s) never reach one request's decode (c1, geomean ~170 t/s) at any
-depth, so even two deep requests finish faster served back-to-back, and c2's
-latency is worse too (incremental TTFT @ d64000 1070 vs 1562 ms; full-context
-load 9292 vs 14178 ms). c2 ≈ c4 aggregate (geomean 86-95) — neither reaches c1.
-Use concurrency only when multiple users must progress simultaneously and you
-can accept ~45-55% lower per-request decode; for raw throughput or a single
-active session, serial wins. A/Bs of fp8 KV, MTP2, and an 8192-token batch
-budget all lost to the tuned baseline; the cost is inherent to the stack.
+A head-to-head confirms **serial (c1) is the most efficient long-context
+setup**: two concurrent requests (c2 total, geomean ~95 t/s) never reach one
+request's decode (c1, geomean ~170 t/s) at any depth, so even two deep
+requests finish faster served back-to-back, and c2's latency is worse too
+(incremental TTFT @ d64000 1070 vs 1562 ms; full-context load 9292 vs 14178
+ms). c2 ≈ c4 aggregate (geomean 86-95) — neither reaches c1. The `--max-num-seqs`
+cap of 2 exists for the #35288 MTP bug (above), not for throughput; use
+concurrency only when multiple users must progress simultaneously and you can
+accept ~45-55% lower per-request decode. A/Bs of fp8 KV, MTP2, and an 8192-token
+batch budget all lost to the tuned baseline; the cost is inherent to the stack.
 
 ## Stability tests
 
