@@ -16,7 +16,8 @@ runs bf16 KV. `--max-num-seqs 2` on the MTP profiles (the #35288 cap);
 `--max-num-batched-tokens 4096` on 35B-A3B.
 
 Single-request numbers are invariant to `--max-num-seqs`; long-context
-concurrency degrades sharply (see README "Long-context concurrency").
+concurrency degrades sharply (see the c1-vs-c2 head-to-head in
+[`archive/BENCHMARKS.md`](archive/BENCHMARKS.md)).
 
 ## Current per-run files
 

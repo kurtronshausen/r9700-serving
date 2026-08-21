@@ -325,45 +325,13 @@ Full tables in
 [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md),
 and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md).
 
-### Depth sweep (35B-A3B, MTP off, tuned dense vs stock)
+### 35B-A3B depth sweep and concurrency (archived)
 
-Deep-context decode is dominated by attention over the cached KV, so the GEMM
-tuning benefit narrows with depth. Same-boot A/B (bf16 KV, tuned MoE, thinking
-off); full sweep in
-[`benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md`](benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md):
-
-| depth | stock tg32 | +tuned dense tg32 | uplift |
-|------:|-----------:|------------------:|:------|
-| 0     | 86.8 | **90.3** | +4% |
-| 4096  | 86.8 | **91.4** | +5% |
-| 65536 | 78.2 | **79.1** | +1% |
-| 128000| 71.4 | **72.3** | +1% |
-
-### Long-context concurrency
-
-Decode cost is dominated by attending over the cached KV, so concurrent
-deep-context requests degrade sharply. Measured on 35B-A3B (BF16 KV + tuned
-MOE, tg32, MTP disabled); per-run tables in
-[`archive/benchmarks/08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md`](archive/benchmarks/08_10_qwen3.6-35b-a3b_mtp4_c1_vs_c2_depth.md).
-`c2 total` = aggregate across 2 concurrent requests, `c2/req` = per request.
-
-| depth | c1 | c2 total | c2/req |
-|------:|---:|---------:|-------:|
-| d1024 | 180 |      127 |    113 |
-| d16384| 156 |       97 |    104 |
-| d32000| 176 |       77 |     97 |
-| d64000| 171 |       47 |     77 |
-
-A head-to-head confirms **serial (c1) is the most efficient long-context
-setup**: two concurrent requests (c2 total, geomean ~95 t/s) never reach one
-request's decode (c1, geomean ~170 t/s) at any depth, so even two deep
-requests finish faster served back-to-back, and c2's latency is worse too
-(incremental TTFT @ d64000 1070 vs 1562 ms; full-context load 9292 vs 14178
-ms). c2 ≈ c4 aggregate (geomean 86-95) — neither reaches c1. The `--max-num-seqs`
-cap of 2 exists for the #35288 MTP bug (above), not for throughput; use
-concurrency only when multiple users must progress simultaneously and you can
-accept ~45-55% lower per-request decode. A/Bs of fp8 KV, MTP2, and an 8192-token
-batch budget all lost to the tuned baseline; the cost is inherent to the stack.
+The 35B-A3B depth sweep (tuned dense vs stock) and the long-context
+concurrency head-to-head (serial/c1 wins; the `--max-num-seqs` 2 cap exists
+for the #35288 MTP bug, not throughput) are archived in
+[`archive/BENCHMARKS.md`](archive/BENCHMARKS.md), with per-run tables in
+[`archive/benchmarks/`](archive/benchmarks/).
 
 ## Stability tests
 
