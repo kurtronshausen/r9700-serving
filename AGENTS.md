@@ -133,7 +133,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 51766 40707 52527 52789 48815 52817; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 40707 52527 52789 48815 52817 52959; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -146,14 +146,17 @@ gh search issues -R vllm-project/vllm --state open --limit 25 "ROCm" --json numb
 gh search issues -R vllm-project/vllm --state open --limit 25 "mamba" --json number,title
 ```
 
-Apply the relevance filters from step 3 when triaging results: a fix only
-matters here if it touches `gfx1201`/ROCm, the hybrid GDN/Mamba path, MTP/
-speculative decoding, prefix caching (align mode), fp8 KV, AITER unified
-attention, or one of the tracked models. NVIDIA/CUDA-only issues are out of
-scope even if the model matches. For a candidate issue, read its body and
-comments: confirm the root cause matches a path this stack actually reaches
-(e.g. check whether an option the issue requires — async scheduling,
-KV connectors, DSpark — is even enabled here) before recommending a fix.
+Apply the relevance filters from step 3 when triaging results: track **only**
+issues that affect this stack (`gfx1201`/ROCm, hybrid GDN/Mamba path, MTP/
+speculative decoding, prefix caching align mode, fp8 KV, AITER unified
+attention) **and** one of the tracked models (Qwen3.6-27B, Qwen3.6-35B-A3B,
+Qwen3.8-27B). Everything else is out of scope — NVIDIA/CUDA-only issues
+included, even if the model matches — and goes to the not-applicable list
+below. For a candidate issue, read its body and comments: confirm the root
+cause matches a path this stack actually reaches (e.g. check whether an
+option the issue requires — async scheduling, KV connectors, DSpark,
+turboquant KV, NVFP4 weights, explicit `--block-size` — is even enabled here)
+before adding it to the watchlist.
 
 ### 3. Relevance filters — does the update matter here?
 
@@ -176,11 +179,14 @@ touches one of:
   - `#35288` MTP concurrency corruption (still mitigated by `max-num-seqs 2`)
   - `#47087` MTP token loops on Qwen3-MoE (resolved by #51113, in v0.27.1 —
     pending 35B MTP re-test)
-  - `#51812` Qwen GDN gate/spec-token alignment — **carried as a local patch**
+  - `#51812` Qwen GDN gate/spec-token alignment — **carried as a local patch**.
+    PR merged upstream 2026-08-11 (`5af7c8d`) but **absent from v0.27.1**;
+    drop the patch once a `VLLM_REF` containing it is in use
   - `#51837` ROCm KV-first attention blocks sharing pages with Mamba —
     **carried as a local patch** (inert on this stack: AITER unified attn is
     blocks-first, `block_dim == 0`, so the fix's branch never fires; only
-    matters if a KV-first backend is ever selected)
+    matters if a KV-first backend is ever selected). PR merged upstream
+    2026-08-11 (`3e372c5`), also **absent from v0.27.1**
   - `#48375` MambaManager ignores `drop_eagle_block` (MTP + prefix caching
     corrupts hybrid recurrent state, #43559/#50188) — **carried as a local patch**
   - `#52872` GDN/hybrid prefill peak under-predicted; `--max-num-batched-tokens`
@@ -207,7 +213,8 @@ touches one of:
     prefix hit (1600 tokens here), bounding the prefix-cache win for MTP even
     after `#45238` is fixed. Monitor for a merged implementation.
   - `#51562` GDN metadata misclassifies stateless first chunk (open)
-  - `#51766` Mamba running CoW after external hits (only w/ KV connectors)
+  - `#52959` RFC: internal state checkpoints for Mamba align mode (same
+    family as `#52789`; in flight, not merged)
   - `#40707` hybrid Mamba scheduling deadlock with 2+ large images in one
     prompt (align block-split collapses to 0 → request hangs forever, engine
     never recovers). Reachable here: all profiles pass
@@ -222,7 +229,13 @@ reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
 #51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52793 (fp8 KV scale-1.0 on
 hybrids) verified **non-issue** on this stack: Qwen3.8-27B fp8 KV runs at
 scale 1.0 but a d200K/d256K probe passed coherence at 258k tokens (see
-README); re-check only if a model with larger K/V range is added.
+README); re-check only if a model with larger K/V range is added. Also
+checked 2026-08-21: #53180 (turboquant_k8v4 + MTP degeneration on hybrid
+GDN — NVIDIA Ada/AWQ, we use fp8 KV; same silent-corruption family, so
+re-check if turboquant KV is ever tried), #52480 (qwen3_5_mtp TP≥2 load
+failure — NVFP4/ModelOpt checkpoints on NVIDIA; our FP8 MTP head loads fine
+at TP=2), #53142 (align pre-copy IMA on prefix-cache resume — requires
+explicit `--block-size`, which we never pass).
 
 ### 4. Local patches vs upstream
 
