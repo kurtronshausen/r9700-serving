@@ -283,7 +283,7 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
-current default stack (fp8 KV, MTP3, 256K context). The other rows are the
+current default stack (fp8 KV, **DFlash2**, 256K context, V2 model runner). The other rows are the
 latest available measurements for those profiles (2026-08-12, pre-patch
 build; ² the 27B profile defaults to fp8 KV today, this run used bf16).
 Full methodology, per-run files, and upgrade history in
@@ -291,13 +291,13 @@ Full methodology, per-run files, and upgrade history in
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
-| Qwen3.8-27B-FP8 (default, 2026-08-21) | MTP3 | fp8 |    2653 |   **65.6** |    70.1 |
+| Qwen3.8-27B-FP8 (default, 2026-08-21) | **DFlash2** (7) | fp8 |    2690 |   **88** |    78 |
 | Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 
-### Depth sweep (Qwen3.8-27B-FP8, current default stack, 2026-08-19)
+### Depth sweep (Qwen3.8-27B-FP8, current default stack, 2026-08-21)
 
-fp8 KV + MTP3 + 256K max-model-len, full-context prefill at depth:
+fp8 KV + **DFlash2** + 256K max-model-len, full-context prefill at depth:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|

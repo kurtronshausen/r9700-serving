@@ -23,7 +23,8 @@ concurrency degrades sharply (see the c1-vs-c2 head-to-head in
 
 | file | contents |
 |:-----|:---------|
-| [`benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md`](benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md) | Qwen3.8-27B d0 on vLLM 0.28.0rc2 bump (no regression vs 0.27.1; prefix probe 0%) |
+| [`benchmarks/08_21_qwen3.8-27b_dflash2_bench.md`](benchmarks/08_21_qwen3.8-27b_dflash2_bench.md) | Qwen3.8-27B d0 with DFlash2 drafter (V2 runner; tg32 ~88 t/s vs MTP3 ~62) |
+| [`benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md`](benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md) | Qwen3.8-27B d0 on vLLM 0.28.0rc2 bump (MTP3, no regression; prefix probe 0%) |
 | [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md) | Qwen3.8-27B d0 + depth, vLLM 0.27.1 + 3 local patches |
 | [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md) | Qwen3.8-27B d0 re-bench (patched) |
 | [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md) | Qwen3.8-27B depth re-sweep d4K–d128K (patched) |
