@@ -5,13 +5,29 @@ full-attention) checkpoint that ships without k/v_scale values.
 On vLLM >= 0.28 (--calculate-kv-scales removed upstream) an fp8 KV cache with
 no checkpoint scales serves at scale 1.0 ("correct bytes, wrong numbers"). This
 tool runs the checkpoint over a small diverse text corpus with vLLM offline,
-hooking Qwen3NextAttention._project_qkv_gate (fork-inherited into the TP
-workers) to record the per-layer amax of post-norm/post-RoPE q, post-norm/
-post-RoPE k, and raw v. Each worker appends its observations to a shared log
-file (CALIB_KV_LOG); the main process aggregates and writes amax/448 (e4m3fn
-convention -- vLLM doubles it internally for the e4m3fnuz runtime scale on
-RDNA) as scalar sidecar tensors plus the matching model.safetensors.index.json
-weight_map entries.
+hooking Qwen3NextAttention._project_qkv_gate to record the per-layer amax of
+post-norm/post-RoPE q, post-norm/post-RoPE k, and raw v. Each worker appends
+its observations to a shared log file (CALIB_KV_LOG); the main process
+aggregates and writes amax/448 (e4m3fn convention -- vLLM doubles it internally
+for the e4m3fnuz runtime scale on RDNA) as scalar sidecar tensors plus the
+matching model.safetensors.index.json weight_map entries.
+
+Coverage is BOTH the main full-attention layers (indices 3,7,...,63 for these
+GDN hybrids) AND the MTP prediction-head layer(s) (mtp.layers.*): the MTP head
+is a stack of its own full-attention decoder layers with separate q/k/v
+projections that cache fp8 KV just like the main model. The LLM() below enables
+MTP spec-decode specifically so the head layers are instantiated and run --
+otherwise they never exist and their KV stays at scale 1.0. Scale tensor names
+are derived from the authoritative model.safetensors.index.json q_proj keys
+(main: model.language_model.layers.N.self_attn; head: mtp.layers.N.self_attn),
+NOT from the hook's attn.layer_name, which uses a different
+(language_model.model...) namespace.
+
+Bootstrap ordering: the calibrator must run on a model dir whose index does NOT
+yet reference the sidecar (i.e. a fresh setup_kvscales copy), because LLM()
+loads weights (index) before the sidecar exists. To re-calibrate an already-
+calibrated copy, first restore the pristine index from the HF snapshot and
+delete the sidecar.
 
 Usage (inside the vLLM container, TP=2):
     CALIB_KV_LOG=/tmp/kvscale.log python tools/calibrate_kv_scales.py <model_dir>
@@ -36,7 +52,10 @@ _orig = Qwen3NextAttention._project_qkv_gate
 def _patched(self, qkv, positions):
     q, k, v, gate = _orig(self, qkv, positions)
     # layer prefix lives on the inner Attention module (self.attn.layer_name),
-    # e.g. model.language_model.layers.3.self_attn.attn
+    # e.g. model.language_model.layers.3.self_attn.attn (main) or
+    # model.language_model.mtp.layers.0.self_attn.attn (MTP prediction head).
+    # Both the main full-attention layers and the MTP head's own full-attention
+    # decoder layer(s) cache fp8 KV, so both must be calibrated.
     name = getattr(getattr(self, "attn", None), "layer_name", None) or "?"
     with open(_LOG, "a") as f:
         for tensor, suffix in ((q, "q"), (k, "k"), (v, "v")):
@@ -49,26 +68,7 @@ Qwen3NextAttention._project_qkv_gate = _patched
 
 from vllm import LLM, SamplingParams  # noqa: E402
 
-PREFIX = "model.language_model.layers.{}.self_attn.attn"
 E4M3FN_MAX = 448.0
-
-
-def full_attn_layers(model_dir: str) -> list[int]:
-    """Derive the full-attention (KV-cached) layer indices from config.json.
-
-    Qwen3.5/3.6/3.8 hybrid checkpoints carry ``layer_types`` on the text config
-    (the VLM wrapper nests it under ``text_config``). The KV cache is only held
-    on ``full_attention`` layers; linear-attention (GDN) layers cache recurrent
-    state instead and have no k/v scales.
-    """
-    cfg = json.load(open(os.path.join(model_dir, "config.json")))
-    tc = cfg.get("text_config", cfg)
-    lt = tc.get("layer_types")
-    if not lt:
-        raise SystemExit(
-            f"no layer_types in {model_dir}/config.json; cannot derive full-attn layers"
-        )
-    return [i for i, t in enumerate(lt) if t == "full_attention"]
 
 
 def _corpus() -> list[str]:
@@ -171,6 +171,10 @@ def main() -> None:
     if os.path.exists(_LOG):
         os.remove(_LOG)
 
+    # Enable MTP spec-decode so the MTP prediction-head layer(s) are
+    # instantiated; otherwise the head's own full-attention layer (which caches
+    # fp8 KV) never runs and its scales would be missing. num_speculative_tokens
+    # is the draft window length; the head has num_nextn_predict_layers layers.
     llm = LLM(
         model=args.model_dir,
         tensor_parallel_size=2,
@@ -181,6 +185,11 @@ def main() -> None:
         kv_cache_dtype="auto",
         attention_backend="ROCM_AITER_UNIFIED_ATTN",
         enable_prefix_caching=False,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+            "attention_backend": "ROCM_AITER_UNIFIED_ATTN",
+        },
     )
     prompts = _corpus()
     llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=args.max_tokens))
@@ -189,39 +198,68 @@ def main() -> None:
 
     if not os.path.exists(_LOG):
         raise SystemExit("no hook records captured; patch did not reach workers")
-    # aggregate max amax per (layer, suffix) across all ranks and all calls
-    layer_scales: dict[tuple[int, str], float] = {}
+    # aggregate max amax per ((kind, layer_idx), suffix) across all ranks/calls;
+    # kind is "main" (full-attention text layers) or "mtp" (prediction head).
+    layer_scales: dict[tuple[str, int], dict[str, float]] = {}
     seen = 0
     with open(_LOG) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            name, _, amax_s = line.partition("\t")
+            rec, _, amax_s = line.partition("\t")
+            base, _, suffix = rec.rpartition(":")
+            if ".self_attn.attn" not in base:
+                print(f"WARN: unexpected record: {line!r}", flush=True)
+                continue
+            kind = "mtp" if ".mtp.layers." in base or base.startswith(
+                "mtp.layers."
+            ) else "main"
             try:
-                layer = int(name.split("layers.")[1].split(".")[0])
+                idx = int(base.split("layers.")[1].split(".")[0])
             except (ValueError, IndexError):
                 print(f"WARN: cannot parse record: {line!r}", flush=True)
                 continue
-            suffix = name.rsplit(":", 1)[1]
             amax = float(amax_s)
             seen += 1
-            key = (layer, suffix)
-            layer_scales[key] = max(layer_scales.get(key, 0.0), amax)
+            entry = layer_scales.setdefault((kind, idx), {})
+            entry[suffix] = max(entry.get(suffix, 0.0), amax)
     print(f"aggregated {seen} observations", flush=True)
 
-    entries = []
-    tensor_dict = {}
-    full_layers = full_attn_layers(args.model_dir)
-    print(f"full-attention layers: {full_layers}", flush=True)
-    for layer in full_layers:
+    # Build output names from the authoritative weight_map keys: every KV-cached
+    # attention layer (main full-attention + the MTP head) has a
+    # `*.self_attn.q_proj.weight` entry. The scale tensor for that layer is the
+    # same base with the `_scale` suffix under `.self_attn.attn`. Deriving the
+    # name from the index avoids guessing the `model.language_model` vs
+    # `language_model.model` prefix (the hook's attn.layer_name differs from the
+    # weight-map namespace).
+    idx = json.load(open(os.path.join(args.model_dir, "model.safetensors.index.json")))
+    by_key: dict[tuple[str, int], str] = {}
+    for key in idx.get("weight_map", {}):
+        if not key.endswith(".self_attn.q_proj.weight"):
+            continue
+        base = key[: -len(".q_proj.weight")]
+        kind = "mtp" if ".mtp.layers." in base or base.startswith(
+            "mtp.layers."
+        ) else "main"
+        if ".layers." not in base:
+            continue
+        by_key[(kind, int(base.split(".layers.")[1].split(".")[0]))] = base
+
+    entries, tensor_dict = [], {}
+    for (kind, i) in sorted(by_key):
+        scales = layer_scales.get((kind, i))
+        if not scales:
+            print(f"WARN: no capture for {kind} layer {i}, skipping", flush=True)
+            continue
+        base = by_key[(kind, i)]
         for suffix in ("q", "k", "v"):
-            amax = layer_scales.get((layer, suffix))
+            amax = scales.get(suffix)
             if amax is None:
-                print(f"WARN: no capture for layer {layer} {suffix}, skipping")
+                print(f"WARN: no {suffix} capture for {kind} layer {i}, skipping")
                 continue
             scale = amax / E4M3FN_MAX
-            tname = f"{PREFIX.format(layer)}.{suffix}_scale"
+            tname = f"{base}.attn.{suffix}_scale"
             tensor_dict[tname] = torch.tensor(scale, dtype=torch.float32)
             entries.append((tname, scale))
             print(f"  {tname} = {scale:.6f}  (amax {amax:.4f})", flush=True)

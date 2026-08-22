@@ -164,7 +164,11 @@ restart anyway).
    `tools/setup_kvscales.py` creates the copy (symlinks into the HF cache) and
    `tools/calibrate_kv_scales.py` hooks attention over a small corpus and writes
    `amax/448` scalars as `model-kvscales.safetensors` + index entries (correct
-   e4m3fnuz convention). Recalibrate with `just clear-kvscales` then `just up`.
+   e4m3fnuz convention). Coverage is the main full-attention layers **and the
+   MTP prediction-head layer(s)**: the calibrator enables MTP spec-decode while
+   capturing so the head's own full-attention layer (`mtp.layers.*`, which caches
+   fp8 KV separately) exists and gets its own scales too. Recalibrate with
+   `just clear-kvscales` then `just up`.
    Measured effect is real: two scale-1.0 instances are 100% token-identical
    and same-instance reruns are 100% identical, but calibrated vs scale-1.0
    diverge ~20-27%, i.e. scale 1.0 genuinely corrupts KV numerics. No throughput
