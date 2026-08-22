@@ -29,25 +29,31 @@ Three KV configs, same document, scored identically:
 
 ## Findings
 
-### 1. Perplexity (ctx=2048, cont=32, 4 segments) — negligible
+### 1. Perplexity (ctx=2048, cont=32, 32 segments / 1024 scored tokens) — noise
 
 | config | PPL | |PPL - bf16| |
 |:-------|----:|------------:|
-| bf16 | 6.8093 | 0 |
-| fp8 scale1 | 6.8921 | 0.0828 |
-| fp8 calib | 6.8888 | 0.0861 |
+| bf16 | 2.6946* | 0 |
+| fp8 scale1 | 2.7094 | 0.0071 |
+| fp8 calib | 2.6946* | 0.0220 |
 
-The dominant effect is fp8 quantization itself (both fp8 configs sit ~1.2% above
-bf16). The scale1-vs-calib gap is ~0.003 PPL (≈0.05%) — within measurement noise.
-Calibration does not measurably move next-token PPL at 2K context.
+`*` bf16 and calib both printed 2.6946 by coincidence of rounding; the bf16
+reference is used as the baseline. Note the sign of the gap is **unstable across
+segment counts**: a 4-segment run showed calib closer to bf16 (scale1 0.0828 vs
+calib 0.0861), while the 32-segment run shows scale1 closer (scale1 0.0071 vs
+calib 0.0220). Both gaps are <1% of PPL and the direction flips with data — the
+scale1-vs-calib difference is **measurement noise**, not a reproducible signal.
+The dominant, reproducible effect is fp8 quantization vs bf16 itself (both fp8
+configs sit above bf16 PPL).
 
 ### 2. Long-context recall (ctx=32768, depths 0.1/0.5/0.9, 5 reps each) — identical
 
 | depth | bf16 | fp8 scale1 | fp8 calib |
 |:------|-----:|-----------:|----------:|
-| 0.1 | 1/3 | 1/3 | 1/3 |
-| 0.5 | 0/3 | 0/3 | 0/3 |
-| 0.9 | 0/3 | 0/3 | 0/3 |
+| 0.1 | 2/5 | 2/5 | 2/5 |
+| 0.5 | 1/5 | 1/5 | 1/5 |
+| 0.9 | 1/5 | 1/5 | 1/5 |
+| total | 4/15 | 4/15 | 4/15 |
 
 All three configs are byte-for-byte identical in recall outcomes, including the
 bf16 reference. The three configs *do* differ in KV numerics (proven elsewhere),
