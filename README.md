@@ -170,9 +170,16 @@ restart anyway).
    diverge ~20-27%, i.e. scale 1.0 genuinely corrupts KV numerics. No throughput
    regression.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on Qwen3.6-27B, **DFlash2** on Qwen3.8-27B, disabled on 35B-A3B — see
+  (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B — see
   [`archive/DEADENDS.md`](archive/DEADENDS.md)).
-- **DFlash drafter must NOT pin `attention_backend`.** Forcing
+- **MTP3 is the Qwen3.8-27B default, not DFlash2.** A clean 2026-08-22 depth A/B
+  on the same calibrated build showed DFlash2's decode win is short-context only:
+  MTP3 holds decode far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs
+  DFlash2 37/24/15) and is far more stable, at the cost of short-context decode
+  (~53-60 vs ~88 @d0). See
+  [`benchmarks/2026-08-22_qwen3.8-27b_fp8kv_dflash_depth.md`](benchmarks/2026-08-22_qwen3.8-27b_fp8kv_dflash_depth.md).
+- **DFlash drafter must NOT pin `attention_backend`** (if re-enabling DFlash2).
+  Forcing
   `ROCM_AITER_UNIFIED_ATTN` on the DFlash draft model makes boot fail
   (`Selected backend ... non-causal attention not supported`) — DFlash needs a
   non-causal-capable backend and AITER unified cannot do non-causal. Leave the
@@ -313,7 +320,10 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
-current default stack (fp8 KV, **DFlash2**, 256K context, V2 model runner). The other rows are the
+current default stack (calibrated fp8 KV, **MTP3**, 256K context). MTP3 was
+made the default over DFlash2 after the 2026-08-22 depth A/B: MTP3 holds decode
+far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs DFlash 37/24/15) at the
+cost of short-context decode (MTP3 tg32 ~53-60 vs DFlash ~88 @d0). The other rows are the
 latest available measurements for those profiles (2026-08-12, pre-patch
 build; ² the 27B profile defaults to fp8 KV today, this run used bf16).
 Full methodology, per-run files, and upgrade history in
@@ -321,7 +331,7 @@ Full methodology, per-run files, and upgrade history in
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
-| Qwen3.8-27B-FP8 (default, 2026-08-21) | **DFlash2** (7) | fp8 |    2690 |   **88** |    78 |
+| Qwen3.8-27B-FP8 (default, 2026-08-22) | **MTP3** | fp8 |    2690 |   ~62 |    ~78 |
 | Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 
