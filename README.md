@@ -138,41 +138,36 @@ restart anyway).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
-  **`--gpu-memory-utilization 0.85`**. **`--max-num-seqs`** defaults to `4`
+  **`--gpu-memory-utilization 0.95`**. **`--max-num-seqs`** defaults to `4`
   (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on all Qwen
   profiles to stay below the #35288 corruption threshold (see "MTP concurrency
   bug").
- - **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
-   the default across all Qwen profiles — it halves KV-cache memory (enabling
-   the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
-   deep-context decode up (see depth sweep below). For BF16 KV, set
-   `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
-    (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
-    and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
-    MTP token loops (see [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the
-    patch.
- - **fp8 KV scales are uncalibrated in the stock FP8 checkpoints, so the
-   default profiles calibrate them.** Neither `Qwen3.8-27B-FP8` nor
-   `Qwen3.6-27B-FP8` ships `k_scale`/`v_scale`/`q_scale`, so vLLM ≥0.28 (which
-   removed `--calculate-kv-scales`) would otherwise serve fp8 KV at **scale
-   1.0** (boot log: `Using KV cache scaling factor 1.0 for fp8_e4m3`). Scale
-   1.0 is miscalibrated — a calibration run records deep-layer V amax up to
-   **~130-132** (layer 63) vs the ~1-24 range scale 1.0 assumes, wasting the
-   e4m3 dynamic range on the small-magnitude bulk. The default profiles point
-   `VLLM_MODEL` at a local calibrated copy (`~/models-local/<model>-kvscales`)
-   that `just up` builds automatically via the `ensure-kvscales` recipe:
-   `tools/setup_kvscales.py` creates the copy (symlinks into the HF cache) and
-   `tools/calibrate_kv_scales.py` hooks attention over a small corpus and writes
-   `amax/448` scalars as `model-kvscales.safetensors` + index entries (correct
-   e4m3fnuz convention). Coverage is the main full-attention layers **and the
-   MTP prediction-head layer(s)**: the calibrator enables MTP spec-decode while
-   capturing so the head's own full-attention layer (`mtp.layers.*`, which caches
-   fp8 KV separately) exists and gets its own scales too. Recalibrate with
-   `just clear-kvscales` then `just up`.
-   Measured effect is real: two scale-1.0 instances are 100% token-identical
-   and same-instance reruns are 100% identical, but calibrated vs scale-1.0
-   diverge ~20-27%, i.e. scale 1.0 genuinely corrupts KV numerics. No throughput
-   regression.
+ - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`, default `bfloat16`).
+   bf16 KV is now the default across all Qwen profiles. The AITER BF16 LDS-fit
+   patch (`patches/aiter/unified-attention-bf16-kv.patch`), which caps
+   `TILE_SIZE` and `attn_stages` to fit 64 KiB LDS, is required for it. Prior
+   "garbage" output was caused by MTP token loops (see
+   [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the patch. To opt back into
+   fp8 KV, set `VLLM_KV_CACHE_DTYPE=fp8` (halves KV-cache memory, useful when
+   context length is the constraint).
+ - **fp8 KV is the opt-in path; when used, the calibrated copy matters.** The
+   stock `Qwen3.8-27B-FP8`/`Qwen3.6-27B-FP8` checkpoints ship no
+   `k_scale`/`v_scale`/`q_scale`, so vLLM ≥0.28 (which removed
+   `--calculate-kv-scales`) would otherwise serve fp8 KV at **scale 1.0** (boot
+   log: `Using KV cache scaling factor 1.0 for fp8_e4m3`). Scale 1.0 is
+   miscalibrated — a calibration run records deep-layer V amax up to **~130-132**
+   (layer 63) vs the ~1-24 range scale 1.0 assumes, wasting the e4m3 dynamic
+   range. The calibrated copy (`~/models-local/<model>-kvscales`, built by
+   `just up` -> `ensure-kvscales` via `tools/setup_kvscales.py` +
+   `tools/calibrate_kv_scales.py`) covers the main full-attention layers **and
+   the MTP prediction-head layer(s)** (`mtp.layers.*`, which caches fp8 KV
+   separately). Measured effect: calibrated vs scale-1.0 diverge ~20-27% (scale
+   1.0 corrupts KV numerics), no throughput regression. Recalibrate with
+   `just clear-kvscales` then `just up`. Note the 2026-08-22 quality A/B
+   (`benchmarks/2026-08-22_kv_calibration_quality_ab.md`) found calibrated vs
+   scale-1.0 **indistinguishable** on both PPL and long-context recall, so
+   calibration is a correctness fix, not a measured quality win — hence bf16 is
+   the safer default.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B — see
   [`archive/DEADENDS.md`](archive/DEADENDS.md)).
@@ -269,13 +264,14 @@ Key tuning decisions:
 - **NCCL channels pinned to 4** (`NCCL_MIN_NCHANNELS=NCCL_MAX_NCHANNELS=4`):
   the bandwidth sweet spot for two GPUs on separate PCIe 5.0 x8 root ports with
   P2P disabled.
-- **fp8 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=fp8`): halves
-  KV-cache memory (enables 256K contexts on Qwen3.8-27B) and keeps
-  deep-context decode up, since decode at depth is bound by the K/V bytes
-  moved per attention step (see depth sweep below). BF16 KV (via the AITER
-  LDS-fit patch) outperformed fp8 on 35B-A3B at shallow context (~88 t/s) and
-  remains the option when context length is not the constraint; the prior
-  "garbage" output was MTP token loops, not the KV dtype.
+- **bf16 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=bfloat16`): higher
+  KV fidelity than fp8. It uses more K/V bytes than fp8, so fp8 (with the
+  calibrated-copy scale fix, halving KV memory) remains the option when context
+  length is the binding constraint. The 2026-08-22 quality A/B found fp8
+  (calibrated or scale-1.0) indistinguishable from bf16 on PPL and long-context
+  recall, so bf16's extra fidelity costs nothing measurable and it is the
+  safer default; the prior "garbage" output was MTP token loops, not the KV
+  dtype.
 - **Tuned dense w8a8 block-FP8 configs** (`fp8_configs/N=*,K=*,device_name=AMD_Radeon_R9700,...json`):
   the 5 per-GPU weight shapes for both 35B-A3B and 27B (TP=2) are now tuned for the
   R9700 via `tools/tune_fp8_dense.py`. Sweeps 576 Triton tile configurations per shape
@@ -317,12 +313,14 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
-current default stack (calibrated fp8 KV, **MTP3**, 256K context). MTP3 was
+current default stack (**MTP3**, 256K context; KV dtype is now **bf16** — the
+row below is the fp8-KV measurement from 2026-08-22, recorded before the bf16
+default switch; re-benchmark pending). MTP3 was
 made the default over DFlash2 after the 2026-08-22 depth A/B: MTP3 holds decode
 far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs DFlash 37/24/15) at the
 cost of short-context decode (MTP3 tg32 ~53-60 vs DFlash ~88 @d0). The other rows are the
 latest available measurements for those profiles (2026-08-12, pre-patch
-build; ² the 27B profile defaults to fp8 KV today, this run used bf16).
+build).
 Full methodology, per-run files, and upgrade history in
 [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
@@ -332,9 +330,11 @@ Full methodology, per-run files, and upgrade history in
 | Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 
-### Depth sweep (Qwen3.8-27B-FP8, current default stack, 2026-08-21)
+### Depth sweep (Qwen3.8-27B-FP8, 2026-08-21)
 
-fp8 KV + **MTP3** + 256K max-model-len, full-context prefill at depth:
+Measured on fp8 KV + **MTP3** + 256K max-model-len (fp8 was still the default
+at the time; KV dtype is now bf16 — these depth numbers are fp8-KV, re-bench
+with bf16 pending), full-context prefill at depth:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|

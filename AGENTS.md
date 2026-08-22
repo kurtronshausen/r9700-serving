@@ -166,7 +166,7 @@ touches one of:
 - **GPU**: `gfx1201` (RDNA4, 2× R9700), ROCm 7.14.0. ROCm-only issues and
   AITER unified-attention paths are in scope; NVIDIA/CUDA-only fixes are not.
 - **Models**: Qwen3.6-27B (dense, MTP4), Qwen3.6-35B-A3B (MoE, MTP off),
-  Qwen3.8-27B (hybrid GDN, MTP3, 256K context, fp8 KV). Anything touching:
+  Qwen3.8-27B (hybrid GDN, MTP3, 256K context, bf16 KV). Anything touching:
   hybrid Mamba/GDN models, MTP/speculative decoding, prefix caching
   (align mamba cache mode), fp8 KV, or `ROCM_AITER_UNIFIED_ATTN` is in scope.
 - **Chat template**: froggeric `chat-templates/qwen.jinja` (pinned, e.g.
@@ -234,19 +234,26 @@ calibration run (see `benchmarks/2026-08-22_lifted_tested.md`) records deep-laye
 V amax up to ~132 vs scale 1.0's ~1-24 assumption — i.e. scale 1.0 is genuinely
 miscalibrated, not just unprecise. It does not cause coherence failures, but it
 does change KV numerics (calibrated vs scale-1.0 deterministic outputs diverge
-~20-27%). Now fixed by default: `env/qwen3.8-27b.env` and `env/qwen3.6-27b.env`
-point `VLLM_MODEL` at a local calibrated copy that `just up` builds via the
-`ensure-kvscales` recipe (`tools/setup_kvscales.py` + `tools/calibrate_kv_scales.py`,
-`amax/448` sidecar + index entries; recalibrate with `just clear-kvscales`).
-Coverage now includes the **MTP prediction-head layer(s)** (`mtp.layers.*`): the
-calibrator enables MTP spec-decode while capturing so the head's own full-attn
-layer(s) exist and get `mtp.layers.*.self_attn.attn.{q,k,v}_scale` too (they
-cache fp8 KV just like the main layers and were silently at scale 1.0). A
-residual `prob_scale 1.0` warning (kv_cache.py, fp8 attention) is separate from
-the KV cache scales — it's the softmax-probability scale for the fp8 attention
-kernel; q_scale is calibrated and consumed, prob_scale stays 1.0 by default and
-did not cause coherence issues at 258K. Re-visit scale calibration whenever KV
-precision matters (long-context recall), not just on coherence. Also
+ ~20-27%). **Made opt-in 2026-08-22**: the quality A/B
+ (`benchmarks/2026-08-22_kv_calibration_quality_ab.md`) found calibrated and
+ scale-1.0 fp8 KV **indistinguishable** on both PPL and long-context recall
+ (PPL gap ~0.02-0.08%, direction flips with data; recall byte-identical), so
+ calibration is a correctness fix, not a measured quality win — and **bf16 KV is
+ now the default** (`VLLM_KV_CACHE_DTYPE=bfloat16` in `compose.yaml` +
+ `env/qwen3.6.env.common`; `VLLM_GPU_MEM_UTIL=0.95`). When fp8 KV is re-enabled,
+ the default profiles still point `VLLM_MODEL` at the calibrated local copy that
+ `just up` builds via the `ensure-kvscales` recipe
+ (`tools/setup_kvscales.py` + `tools/calibrate_kv_scales.py`, `amax/448`
+ sidecar + index entries; recalibrate with `just clear-kvscales`), whose
+ coverage includes the **MTP prediction-head layer(s)** (`mtp.layers.*`): the
+ calibrator enables MTP spec-decode while capturing so the head's own full-attn
+ layer(s) exist and get `mtp.layers.*.self_attn.attn.{q,k,v}_scale` too (they
+ cache fp8 KV just like the main layers and were silently at scale 1.0). A
+ residual `prob_scale 1.0` warning (kv_cache.py, fp8 attention) is separate from
+ the KV cache scales — it's the softmax-probability scale for the fp8 attention
+ kernel; q_scale is calibrated and consumed, prob_scale stays 1.0 by default and
+ did not cause coherence issues at 258K. Re-visit scale calibration whenever KV
+ precision matters (long-context recall), not just on coherence. Also
 checked 2026-08-21: #53180 (turboquant_k8v4 + MTP degeneration on hybrid
 GDN — NVIDIA Ada/AWQ, we use fp8 KV; same silent-corruption family, so
 re-check if turboquant KV is ever tried), #52480 (qwen3_5_mtp TP≥2 load
