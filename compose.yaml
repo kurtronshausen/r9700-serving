@@ -92,6 +92,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 600s
+    # NOTE: --max-num-seqs is capped at 2 UNIVERSALLY (compose default) until
+    # vllm-project/vllm#35288 is fixed: MTP spec-decode corrupts output (garbage
+    # header -> repetition loop) when a decode batch reaches 4+ sequences. It
+    # applies to ALL profiles, MTP-enabled or not, so the safe default lives here
+    # (see --max-num-seqs below) rather than only in per-profile env. Raise only
+    # after the upstream bug is addressed.
     command: >
       ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
@@ -108,7 +114,7 @@ services:
       --host 0.0.0.0
       --port 8180
       --dtype auto
-      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-4}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
       --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-bfloat16}
       -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN
