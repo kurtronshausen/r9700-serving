@@ -313,9 +313,8 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
-current default stack (**MTP3**, 256K context; KV dtype is now **bf16** — the
-row below is the fp8-KV measurement from 2026-08-22, recorded before the bf16
-default switch; re-benchmark pending). MTP3 was
+current default stack (**MTP3**, 256K context, **bf16 KV**; measured 2026-08-22
+after the bf16 default switch). MTP3 was
 made the default over DFlash2 after the 2026-08-22 depth A/B: MTP3 holds decode
 far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs DFlash 37/24/15) at the
 cost of short-context decode (MTP3 tg32 ~53-60 vs DFlash ~88 @d0). The other rows are the
@@ -326,37 +325,36 @@ Full methodology, per-run files, and upgrade history in
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
-| Qwen3.8-27B-FP8 (default, 2026-08-22) | **MTP3** | fp8 |    2690 |   ~62 |    ~78 |
+| Qwen3.8-27B-FP8 (default, 2026-08-22) | **MTP3** | bf16 |    2628 |   ~57 |    ~65 |
 | Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
 
-### Depth sweep (Qwen3.8-27B-FP8, 2026-08-21)
+### Depth sweep (Qwen3.8-27B-FP8, 2026-08-22, current default: bf16 KV)
 
-Measured on fp8 KV + **MTP3** + 256K max-model-len (fp8 was still the default
-at the time; KV dtype is now bf16 — these depth numbers are fp8-KV, re-bench
-with bf16 pending), full-context prefill at depth:
+Current default stack: bf16 KV + **MTP3** + 256K max-model-len, full-context
+prefill at depth:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|
-| 4096  |     2796.73 |     60.07 |          2.20 |
-| 8192  |     2756.66 |     61.10 |          3.72 |
-| 16384 |     2704.39 |     62.44 |          6.82 |
-| 32768 |     2591.25 |     57.81 |         13.44 |
-| 65536 |     2370.84 |     45.70 |         28.51 |
-| 128000|     2035.60 |     48.02 |         63.90 |
-| 200000|     1743.31 |     35.60 |        115.91 |
-| 256000|     1562.51 |     33.81 |        165.17 |
+| 4096  |     2708.14 |     57.49 |          2.27 |
+| 8192  |     2654.98 |     54.53 |          3.86 |
+| 16384 |     2531.50 |     64.71 |          7.28 |
+| 32768 |     2290.63 |     59.00 |         15.20 |
+| 65536 |     1909.03 |     51.50 |         35.40 |
+| 128000|     1445.16 |     61.12 |         89.99 |
+| 200000|     1119.89 |     50.46 |        180.42 |
+| 256000|      953.17 |     44.97 |        270.73 |
 
-Decode holds 57–62 t/s to d32K, then falls to 33.8 t/s at d256K as the
-attention span grows (fp8 KV's halved K/V bytes offset it partly);
-full-context prefill degrades 2797 → 1563 t/s and e2e TTFT scales roughly
-linearly to 165 s at d256K. The d200K/d256K rows doubled as a coherence
-probe: no NaN/corruption/worker death at 258k total tokens (right at the
-262144 window limit) — the scale-1.0 fp8 KV config holds up at max context.
-Full tables in
-[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md),
-[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md),
-and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md).
+bf16 KV doubles the K/V bytes per attention step, so **deep prefill/TTFT is
+slower than the fp8 sweep** (pp256K 953 vs 1563 t/s, ~39% down; TTFT 271 vs
+165 s at d256K). Decode holds 51–65 t/s out to d200K and 45 t/s at d256K
+(recorded here higher than the old fp8 figures — see the cross-build caveat in
+the depth doc). Coherence passed at every depth; MTP acceptance ~33% unchanged.
+Full tables and the fp8-vs-bf16 comparison in
+[`benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md`](benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md);
+the earlier fp8-KV depth sweeps are in
+[`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_depth.md)
+and [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_d0.md).
 
 ### 35B-A3B depth sweep and concurrency (archived)
 
