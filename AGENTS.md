@@ -227,9 +227,19 @@ NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
 MTP), non-Qwen models (#52833/#48568 GLM, #51530 DeepSeek), or paths not
 reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
 #51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52793 (fp8 KV scale-1.0 on
-hybrids) verified **non-issue** on this stack: Qwen3.8-27B fp8 KV runs at
-scale 1.0 but a d200K/d256K probe passed coherence at 258k tokens (see
-README); re-check only if a model with larger K/V range is added. Also
+hybrids) was previously logged as a "non-issue" because a d200K/d256K probe
+passed coherence at 258k tokens. **Revisited 2026-08-22**: the stock FP8
+checkpoints ship no k/v/q scales, so fp8 KV serves at scale 1.0, and a
+calibration run (see `benchmarks/2026-08-22_lifted_tested.md`) records deep-layer
+V amax up to ~132 vs scale 1.0's ~1-24 assumption — i.e. scale 1.0 is genuinely
+miscalibrated, not just unprecise. It does not cause coherence failures, but it
+does change KV numerics (calibrated vs scale-1.0 deterministic outputs diverge
+~20-27%). Now fixed by default: `env/qwen3.8-27b.env` and `env/qwen3.6-27b.env`
+point `VLLM_MODEL` at a local calibrated copy that `just up` builds via the
+`ensure-kvscales` recipe (`tools/setup_kvscales.py` + `tools/calibrate_kv_scales.py`,
+`amax/448` sidecar + index entries; recalibrate with `just clear-kvscales`).
+Re-visit scale calibration whenever KV precision matters (long-context recall),
+not just on coherence. Also
 checked 2026-08-21: #53180 (turboquant_k8v4 + MTP degeneration on hybrid
 GDN — NVIDIA Ada/AWQ, we use fp8 KV; same silent-corruption family, so
 re-check if turboquant KV is ever tried), #52480 (qwen3_5_mtp TP≥2 load

@@ -127,7 +127,48 @@ prewarm: check ensure-cache-dirs
         -c "import aiter; from aiter.ops.triton.unified_attention import unified_attention"
     printf 'aiter pre-warm complete.\n'
 
-up: check ensure-cache-dirs prewarm
+# Ensure the selected profile's calibrated KV-scale model copy exists. Profiles
+# that want calibrated fp8 KV declare VLLM_MODEL_ID (HF source id) + VLLM_MODEL
+# (local copy path) in their env file. If the local copy's sidecar is missing,
+# create the copy from the HF cache and calibrate it in one throwaway container.
+# Idempotent: skips once the sidecar exists. Runs before the server starts, so
+# the GPUs are free for calibration.
+ensure-kvscales:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="env/{{model}}.env"
+    model_id="$(grep -m1 '^VLLM_MODEL_ID=' "$profile" | cut -d= -f2- || true)"
+    local_model="$(grep -m1 '^VLLM_MODEL=' "$profile" | cut -d= -f2- || true)"
+    if [ -z "$model_id" ]; then
+        printf 'profile %s has no VLLM_MODEL_ID; skipping kv-scale setup.\n' "$profile"
+        exit 0
+    fi
+    sidecar="$local_model/model-kvscales.safetensors"
+    if [ -f "$sidecar" ]; then
+        printf 'kv-scales up to date: %s\n' "$local_model"
+        exit 0
+    fi
+    printf 'setting up calibrated KV-scale copy: %s -> %s\n' "$model_id" "$local_model"
+    python3 tools/setup_kvscales.py "$model_id" "$local_model"
+    printf 'calibrating fp8 KV scales ...\n'
+    {{compose}} run -T --rm --no-deps -e CALIB_KV_LOG=/workspace/kvscale.log \
+        --entrypoint python vllm \
+        "$PWD/tools/calibrate_kv_scales.py" "$local_model"
+    printf 'kv-scales calibrated: %s\n' "$local_model"
+
+# Remove the calibrated model copy so the next `just up` recalibrates it.
+clear-kvscales:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    local_model="$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2- || true)"
+    if [ -n "$local_model" ] && [ -d "$local_model" ]; then
+        rm -rf -- "$local_model"
+        printf 'removed %s\n' "$local_model"
+    else
+        printf 'no local model copy for profile %s.\n' "{{model}}"
+    fi
+
+up: check ensure-cache-dirs prewarm ensure-kvscales
     #!/usr/bin/env bash
     set -euo pipefail
     served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"

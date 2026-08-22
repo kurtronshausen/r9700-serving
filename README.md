@@ -142,18 +142,48 @@ restart anyway).
   (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on all Qwen
   profiles to stay below the #35288 corruption threshold (see "MTP concurrency
   bug").
-- **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
-  the default across all Qwen profiles — it halves KV-cache memory (enabling
-  the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
-  deep-context decode up (see depth sweep below). For BF16 KV, set
-  `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
-   (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
-   and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
-   MTP token loops (see [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the
-   patch.
+ - **`--kv-cache-dtype fp8`** (`VLLM_KV_CACHE_DTYPE`, default `fp8`). fp8 KV is
+   the default across all Qwen profiles — it halves KV-cache memory (enabling
+   the 256K context on Qwen3.8-27B) and its smaller K/V bytes keep
+   deep-context decode up (see depth sweep below). For BF16 KV, set
+   `VLLM_KV_CACHE_DTYPE=bfloat16` plus the AITER BF16 LDS-fit patch
+    (`patches/aiter/unified-attention-bf16-kv.patch`), which caps `TILE_SIZE`
+    and `attn_stages` to fit 64 KiB LDS. Prior "garbage" output was caused by
+    MTP token loops (see [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the
+    patch.
+ - **fp8 KV scales are uncalibrated in the stock FP8 checkpoints, so the
+   default profiles calibrate them.** Neither `Qwen3.8-27B-FP8` nor
+   `Qwen3.6-27B-FP8` ships `k_scale`/`v_scale`/`q_scale`, so vLLM ≥0.28 (which
+   removed `--calculate-kv-scales`) would otherwise serve fp8 KV at **scale
+   1.0** (boot log: `Using KV cache scaling factor 1.0 for fp8_e4m3`). Scale
+   1.0 is miscalibrated — a calibration run records deep-layer V amax up to
+   **~130-132** (layer 63) vs the ~1-24 range scale 1.0 assumes, wasting the
+   e4m3 dynamic range on the small-magnitude bulk. The default profiles point
+   `VLLM_MODEL` at a local calibrated copy (`~/models-local/<model>-kvscales`)
+   that `just up` builds automatically via the `ensure-kvscales` recipe:
+   `tools/setup_kvscales.py` creates the copy (symlinks into the HF cache) and
+   `tools/calibrate_kv_scales.py` hooks attention over a small corpus and writes
+   `amax/448` scalars as `model-kvscales.safetensors` + index entries (correct
+   e4m3fnuz convention). Recalibrate with `just clear-kvscales` then `just up`.
+   Measured effect is real: two scale-1.0 instances are 100% token-identical
+   and same-instance reruns are 100% identical, but calibrated vs scale-1.0
+   diverge ~20-27%, i.e. scale 1.0 genuinely corrupts KV numerics. No throughput
+   regression.
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on Qwen3.6-27B, MTP3 on Qwen3.8-27B; disabled on 35B-A3B — see
+  (MTP4 on Qwen3.6-27B, **DFlash2** on Qwen3.8-27B, disabled on 35B-A3B — see
   [`archive/DEADENDS.md`](archive/DEADENDS.md)).
+- **DFlash drafter must NOT pin `attention_backend`.** Forcing
+  `ROCM_AITER_UNIFIED_ATTN` on the DFlash draft model makes boot fail
+  (`Selected backend ... non-causal attention not supported`) — DFlash needs a
+  non-causal-capable backend and AITER unified cannot do non-causal. Leave the
+  drafter's `attention_backend` unset in `--speculative-config` so vLLM
+  auto-selects it (this is why `env/qwen3.8-27b.env` omits it).
+- **PCIe P2P must stay disabled on this host.** `NCCL_P2P_DISABLE=1` is
+  required: the two R9700s sit on separate PCIe root ports, and enabling P2P
+  (`NCCL_P2P_DISABLE=0`, even with `HSA_ENABLE_IPC_MODE_LEGACY=0`) collapses
+  DFlash decode from ~92 t/s to ~9 t/s (10× regression) despite RCCL
+  establishing P2P channels. `HSA_ENABLE_IPC_MODE_LEGACY` is irrelevant once
+  P2P is off. This also rules out the P2P all-reduce HIP kernels on this box.
 
 ### Runtime overlays (bind-mounted source fixes)
 
