@@ -172,19 +172,12 @@ restart anyway).
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
   (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B — see
   [`archive/DEADENDS.md`](archive/DEADENDS.md)).
-- **MTP3 is the Qwen3.8-27B default, not DFlash2.** A clean 2026-08-22 depth A/B
-  on the same calibrated build showed DFlash2's decode win is short-context only:
-  MTP3 holds decode far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs
-  DFlash2 37/24/15) and is far more stable, at the cost of short-context decode
-  (~53-60 vs ~88 @d0). See
-  [`benchmarks/2026-08-22_qwen3.8-27b_fp8kv_dflash_depth.md`](benchmarks/2026-08-22_qwen3.8-27b_fp8kv_dflash_depth.md).
-- **DFlash drafter must NOT pin `attention_backend`** (if re-enabling DFlash2).
-  Forcing
-  `ROCM_AITER_UNIFIED_ATTN` on the DFlash draft model makes boot fail
-  (`Selected backend ... non-causal attention not supported`) — DFlash needs a
-  non-causal-capable backend and AITER unified cannot do non-causal. Leave the
-  drafter's `attention_backend` unset in `--speculative-config` so vLLM
-  auto-selects it (this is why `env/qwen3.8-27b.env` omits it).
+- **MTP3 is the Qwen3.8-27B default.** DFlash2 was tried and rejected: a clean
+  2026-08-22 depth A/B on the same calibrated build showed DFlash2's decode win
+  is short-context only (MTP3 holds ~50-60 t/s out to d64K and ~37@d128K vs
+  DFlash2 37/24/15, with far lower variance). See
+  [`archive/DEADENDS.md`](archive/DEADENDS.md) and
+  [`benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md`](benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md).
 - **PCIe P2P must stay disabled on this host.** `NCCL_P2P_DISABLE=1` is
   required: the two R9700s sit on separate PCIe root ports, and enabling P2P
   (`NCCL_P2P_DISABLE=0`, even with `HSA_ENABLE_IPC_MODE_LEGACY=0`) collapses
@@ -337,7 +330,7 @@ Full methodology, per-run files, and upgrade history in
 
 ### Depth sweep (Qwen3.8-27B-FP8, current default stack, 2026-08-21)
 
-fp8 KV + **DFlash2** + 256K max-model-len, full-context prefill at depth:
+fp8 KV + **MTP3** + 256K max-model-len, full-context prefill at depth:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|

@@ -8,6 +8,20 @@
 
 ## Dead ends
 
+- **DFlash2 speculative decoding as the Qwen3.8-27B default** (tried 2026-08-21,
+  reverted 2026-08-22). DFlash2 (`incoai/Qwen3.8-27B-DFlash2`, block 8,
+  `num_speculative_tokens 7`) was briefly the 3.8 default after depth-0 decode
+  beat MTP3 (~88 vs ~62 tg32). A clean depth A/B on the same calibrated
+  v0.28.0rc2 build showed the win is **short-context only**: DFlash2 decode
+  decays hard with depth (tg32 60.9@d4K → 37.5@d32K → 24.4@d64K → 14.8@d128K)
+  and collapses under concurrency at depth (2.2@d64K c2), while MTP3 holds
+  ~50-60 out to d64K and ~37@d128K with far lower variance. Reverted to MTP3.
+  Two additional DFlash boot caveats: the drafter must NOT pin
+  `attention_backend` to `ROCM_AITER_UNIFIED_ATTN` (non-causal attention not
+  supported → server crash-loops on boot; leave it unset so vLLM auto-selects a
+  non-causal-capable backend), and DFlash2 uses text-only draft inputs on
+  multimodal (images verified coherent, but draft ignores vision). Depth data:
+  `benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md`.
 - **AITER MoE/FP8 backend on gfx1201**: vLLM aborts at startup. Enable once
   upstream AITER adds RDNA4 support.
 - **`--enable-expert-parallel` on top of `-tp 2`**: regresses decode ~7-12% on
