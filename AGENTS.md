@@ -133,7 +133,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 40707 52527 52789 48815 52817 52959; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 40707 52527 52789 48815 52817 52959 51198 49125; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -194,6 +194,12 @@ touches one of:
   - `#47602` MTP draft acceptance decays with context length (Qwen3.6-27B)
   - `#51250` prefix caching is a silent no-op on GDN hybrid (same family as
     `#45238`)
+  - `#51198` newer restatement (2026-08-21) of the `#45238`/`#51250` hybrid
+    prefix-cache 0%-hit no-op — confirms the family is still open (monitor)
+  - `#49125` stale partial prefix-cache hash resurrected after full-block
+    promotion (pure-Python `BlockPool` bug in the fine-grained/partial
+    prefix-caching path `#45939`/`#46384`). Only reachable once `#45238` is
+    fixed and prefix caching actually hits — monitor post-fix
   - `#52520` align-mode admission livelock near KV-pool ceiling (open)
   - `#45238` hybrid prefix caching drops to 0% in align mode (open) — the
     binding constraint on this stack. Root cause in v0.27.1:
