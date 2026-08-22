@@ -206,18 +206,22 @@ touches one of:
     `BlockPool.cache_full_blocks` skips Mamba align-mode null blocks
     (block_pool.py, "Mamba models with prefix-caching in align mode"), so only
     ~1 checkpoint hash per request is registered; a missing Mamba checkpoint
-    vetoes all attention-group hits (every group must hit). Live geometry:
-    `block_size=1600` (see `vllm:cache_config_info`), so hits are 0% whenever
-    `floor((prompt_len-1)/1600)*1600 > shared_prefix_len` — measured **0% on
-    the qwen3.8-27b multi-turn probe (2026-08-20)**. Fix in flight, none
+     vetoes all attention-group hits (every group must hit). Live geometry:
+     `block_size=832` on the bf16-KV default (was `1600` on the old fp8-KV
+     default — the 2-byte KV halves tokens-per-block; see
+     `vllm:cache_config_info`), so hits are 0% whenever
+     `floor((prompt_len-1)/832)*832 > shared_prefix_len` — measured **0% on
+     the qwen3.8-27b multi-turn probe (2026-08-20, fp8; re-confirmed 2026-08-22
+     on bf16-KV, still 0% across 4 turns)**. Fix in flight, none
     merged: `#52527` (metrics for shared-prefix tokens lost to missing
     checkpoints), `#52789` (internal prefill checkpoints, 9–25% TTFT),
     `#48815` (MTP align retention). **When one merges**: carry it as a local
     patch only if the current `VLLM_REF` release does not already contain it —
     if it's in an available vLLM bump, prefer the bump (step 5), not a patch.
   - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
-    prefix hit (1600 tokens here), bounding the prefix-cache win for MTP even
-    after `#45238` is fixed. Monitor for a merged implementation.
+    prefix hit (832 tokens here on the bf16-KV default; was 1600 on fp8),
+    bounding the prefix-cache win for MTP even after `#45238` is fixed. Monitor
+    for a merged implementation.
   - `#51562` GDN metadata misclassifies stateless first chunk (open)
   - `#52959` RFC: internal state checkpoints for Mamba align mode (same
     family as `#52789`; in flight, not merged)
