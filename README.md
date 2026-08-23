@@ -1,8 +1,9 @@
 # vLLM on Radeon AI PRO R9700
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
-configuration targets two R9700s (`gfx1201`) and serves a model through vLLM's
-OpenAI-compatible API.
+configuration targets four R9700s (`gfx1201`) and serves a model through
+vLLM's OpenAI-compatible API, with an optional second, concurrent container
+for a vision-language profile (see [Multiple containers](#multiple-containers)).
 
 ## Requirements
 
@@ -12,7 +13,7 @@ OpenAI-compatible API.
 - [`git`](https://git-scm.com/) (to fetch the source)
 - SELinux hosts need no special relabeling: bind mounts mount unlabeled because
   the container runs with `label=disable`
-- One or more R9700 GPUs; the included configuration assumes two
+- One or more R9700 GPUs; the included configuration assumes four
 
 ## Quick start
 
@@ -32,11 +33,12 @@ commands below run from inside that directory.)
 ```sh
 cp .env.example .env  # Build version pins + default model profile (untracked)
 just build       # Build localhost/vllm-fullbuild:latest
-just check       # Validate the compose config for the selected profile
-just up          # Start vLLM in the background (default: Qwen3.8-27B-FP8)
-just --set model qwen3.6-27b up     # Switch to Qwen3.6-27B-FP8 (dense)
-just --set model qwen3.6-35b-a3b up  # Switch to MoE 35B-A3B model
-just logs        # Follow service logs
+just check       # Validate the compose config for the selected profiles
+just up          # Start both containers in the background (default: Qwen3.8-27B-FP8 + Qwen2.5-VL-72B vision)
+just --set model qwen3.6-27b up     # Switch the main container to Qwen3.6-27B-FP8 (dense)
+just --set model qwen3.6-35b-a3b up  # Switch the main container to the MoE 35B-A3B model
+just --set vision_model qwen2.5-vl-72b-instruct up  # Switch the vision container's profile
+just logs        # Follow service logs (`just logs vllm-vision` for one)
 just down        # Stop and remove containers
 ```
 
@@ -45,14 +47,19 @@ Run `just --list` to see all recipes including `rebuild` (force-rebuild) and
 `clear-vllm-caches` (wipe host-side Triton/Inductor/AITER caches; preserves
 HuggingFace model cache).
 
-Always go through `just`: `compose.yaml` interpolates the model arguments from
-`env/<profile>.env`, which the recipes pass to compose via `--env-file`. A bare
-`docker compose up` fails with a required-variable error rather than starting a
-server with no model.
+Always go through `just`: each service's `env/<profile>.env` (passed to
+compose via `--env-file`) feeds the container's environment, and
+`entrypoint.sh` assembles the `vllm serve` arguments from it at startup. A
+bare `docker compose up` fails with a required-variable error
+(`MODEL_PROFILE`/`VISION_MODEL_PROFILE` unset) rather than starting servers
+with no model; a container whose profile vars are missing aborts with a
+message instead of serving.
 
-The vLLM OpenAI-compatible API is available at `http://localhost:8180/v1`.
-Other containers on the same compose network can reach it via the `llm-backend`
-network alias instead of the host port.
+The vLLM OpenAI-compatible API is available at `http://localhost:8000/v1`
+(main container; `PORT` in `.env` to move it). Other containers on the same
+compose network can reach it via the `llm-backend` network alias instead of
+the host port. The vision container serves at `http://localhost:8001/v1`
+(`VISION_PORT`) / `llm-vision-backend` alias.
 
 ## Configuration
 
@@ -82,7 +89,7 @@ Model selection is controlled by `MODEL_PROFILE` in `.env` — override inline
 with `MODEL_PROFILE=qwen3.6-27b just up`.
 
 Runtime environment is split across files:
-- `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
+- `env/2xr9700.vllm.common` — ROCm config for all four visible GPUs (arch, NCCL, HSA)
 - `env/aiter-unified-attention.env` — enables AITER unified attention only
 - `env/qwen3.6.env.common` — shared qwen3.6/3.8 config (KV cache dtype, MTP spec-decode, tool choice)
 - `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP disabled)
@@ -90,13 +97,38 @@ Runtime environment is split across files:
 - `env/qwen3.8-27b.env` — Qwen3.8-27B-FP8 dense model config (same
   architecture as 3.6-27B, so it shares the 3.6 common settings and tuned
   per-shape fp8 GEMM configs)
+- `env/qwen2.5-vl-72b-instruct.env` — Qwen2.5-VL-72B-Instruct-AWQ vision
+  profile for the `vllm-vision` container
+
+### Multiple containers
+
+`compose.yaml` defines a second service, `vllm-vision`: the same image and
+`entrypoint.sh`, but fed by `env/${VISION_MODEL_PROFILE}.env` (default
+`qwen2.5-vl-72b-instruct`), on host port `${VISION_PORT:-8001}` (main uses
+`${PORT:-8000}`), with its own triton/torchinductor/tilelang cache dirs
+(`~/.cache/{triton,torchinductor,tilelang}_vision`) so the two containers
+never share mutable compile-cache state. The aiter JIT dir is shared on
+purpose: `just prewarm` builds the kernels once in the main service's env and
+both containers then only read them (concurrent *builds* are the hazard).
+
+`just up` starts both services; it waits for and warms up the main one while
+the (much larger) vision model keeps loading — check it with
+`just logs vllm-vision`. Select profiles with `MODEL_PROFILE` /
+`VISION_MODEL_PROFILE` (or `just --set model ...` / `just --set vision_model
+...`). Both containers see all four GPUs
+(`env/2xr9700.vllm.common`); when running them at the same time, give them
+non-overlapping GPU sets at runtime (e.g. `HIP_VISIBLE_DEVICES=0,1` vs `2,3`)
+and match `VLLM_TP` to the set size.
 
 ### Chat template
 
-All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
+All profiles mount [froggeric's Qwen-Fixed-Chat-Templates]
 (`chat-templates/qwen.jinja`, pinned to **v22.3** — `qwen3.8-froggeric-v22.3`,
-fetched from the repo's `main`). It is applied to every model via
-`--chat-template` in `compose.yaml`, overriding each model's bundled template.
+fetched from the repo's `main`). The `vllm` service sets
+`VLLM_CHAT_TEMPLATE` to that file, so `entrypoint.sh` applies it to the
+qwen3.x models, overriding each model's bundled template. The `vllm-vision`
+service leaves `VLLM_CHAT_TEMPLATE` unset and uses the tokenizer's built-in
+template (the froggeric template targets the qwen3.x models).
 The template fixes rendering bugs, KV-cache invalidation, token waste, and
 agentic stalling in the official Qwen templates, and adds tool-error retry
 warnings plus optional `tool_call_format="json"` / reasoning-effort steering
@@ -138,10 +170,10 @@ restart anyway).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
-  **`--gpu-memory-utilization 0.95`**. **`--max-num-seqs`** defaults to `4`
-  (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on all Qwen
-  profiles to stay below the #35288 corruption threshold (see "MTP concurrency
-  bug").
+  **`--gpu-memory-utilization 0.95`**. **`--max-num-seqs`** defaults to `2`
+  (`entrypoint.sh`), and `qwen3.6.env.common` keeps it `2` explicitly on all
+  Qwen profiles to stay below the #35288 corruption threshold (see "MTP
+  concurrency bug").
  - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`, default `bfloat16`).
    bf16 KV is now the default across all Qwen profiles. The AITER BF16 LDS-fit
    patch (`patches/aiter/unified-attention-bf16-kv.patch`), which caps
@@ -243,7 +275,7 @@ and `env/2xr9700.vllm.common` (loaded via `env_file`):
 | `FLASH_ATTENTION_TRITON_AMD_ENABLE` | `TRUE` | enable Triton FA on AMD |
 | `TOKENIZERS_PARALLELISM` | `false` | avoid HF tokenizer thread churn |
 | `HOME` | `$HOME` (compose `user:`) | container runs as host user; whole home mounted, caches redirected under `~/.cache` (`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `TILELANG_CACHE_DIR`) |
-| `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` | `0,1` | select the two R9700s |
+| `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` | `0,1,2,3` | all four R9700s visible to every container; partition at runtime when running both |
 | `HIP_ARCHITECTURES`/`AMDGPU_TARGETS`/etc. | `gfx1201` | target the R9700 ISA |
 
 The `VLLM_ROCM_USE_AITER_*` flags in `env/aiter-unified-attention.env` enable
@@ -373,5 +405,5 @@ See [`benchmarks/STABILITY_TESTS.md`](benchmarks/STABILITY_TESTS.md) for scripts
 and baseline results. Quick health check:
 
 ```sh
-just check && curl -sf http://localhost:8180/health && echo "OK"
+just check && curl -sf http://localhost:8000/health && echo "OK"
 ```

@@ -11,30 +11,43 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 
 | recipe | purpose |
 |:-------|:--------|
-| `just check` | validate the compose config for the selected model profile |
+| `just check` | validate the compose config for both model profiles (main + vision) |
 | `just build` | build the Docker image |
 | `just rebuild` | force-rebuild (no cache) |
-| `just up` | start the vLLM server (runs `check`, `ensure-cache-dirs`, `prewarm`, starts container, waits for readiness, runs warmup) |
+| `just up` | start the vLLM servers (runs `check`, `ensure-cache-dirs`, `prewarm`, starts both containers, waits for main readiness, runs warmup) |
 | `just prewarm` | build shared aiter JIT kernels in one throwaway container (runs automatically before every `up`) |
 | `just bench` | benchmark the selected model via `llama-benchy` (pp2048, tg32+128) |
-| `just logs` | follow container logs (`docker compose logs -f`) |
-| `just down` | stop and remove the container |
+| `just logs [service]` | follow container logs (all services, or one: `just logs vllm-vision`) |
+| `just down` | stop and remove the containers |
 | `just exec <cmd>` | run a command inside the running container (e.g. `just exec bash`) |
+| `just compose <args>` | raw compose passthrough (e.g. `just compose up -d vllm`, `just compose ps`) |
 | `just ensure-cache-dirs` | pre-create host cache dirs owned by the current user |
-| `just clear-vllm-caches` | wipe compile caches (triton, torchinductor, aiter, etc.) |
+| `just clear-vllm-caches` | wipe compile caches (triton, torchinductor, aiter, etc., incl. the `*_vision` dirs) |
 
-`compose.yaml` interpolates `VLLM_MODEL`/`VLLM_TOKENIZER`/`VLLM_SERVED_NAME`/
-`VLLM_SPEC_DECODE` from `env/<profile>.env`, which the recipes pass to compose
-via `--env-file` (alongside `.env` for the build pins). Bare `docker compose up`
-fails with a required-variable error by design — always go through `just`.
-`.env` is untracked; create it with `cp .env.example .env`.
+There is no `command:` in `compose.yaml`: `entrypoint.sh` (the image
+ENTRYPOINT) assembles the `vllm serve` arguments from each service's own
+environment at startup — the `env/<profile>.env` stack the recipes pass to
+compose via `--env-file` (alongside `.env` for the build pins). This is what
+lets `vllm` and `vllm-vision` run different profiles from one compose file.
+Bare `docker compose up` fails with a required-variable error
+(`MODEL_PROFILE`/`VISION_MODEL_PROFILE` unset) by design — always go through
+`just`. `.env` is untracked; create it with `cp .env.example .env`.
 
-To switch models, set `MODEL_PROFILE` or use `--set`:
+To switch models, set `MODEL_PROFILE` / `VISION_MODEL_PROFILE` or use `--set`:
 
 ```
 MODEL_PROFILE=qwen3.6-27b just up
 just --set model qwen3.6-27b up
+just --set vision_model qwen2.5-vl-72b-instruct up
 ```
+
+`vllm-vision` is a second, concurrent container (same image/entrypoint) on
+host port `${VISION_PORT:-8001}` (main: `${PORT:-8000}`), fed by
+`env/${VISION_MODEL_PROFILE}.env`, with its own
+`~/.cache/{triton,torchinductor,tilelang}_vision` dirs. The aiter JIT dir is
+shared between the two containers (`just prewarm` builds it once). Both
+containers see all four GPUs; assign non-overlapping GPU sets at runtime when
+running them together (see README "Multiple containers").
 
 ## Build Caveats
 
@@ -61,7 +74,9 @@ just --set model qwen3.6-27b up
   the host user, so `just ensure-cache-dirs` only pre-creates `~/.cache` and
   `~/.vllm-workspace`.
 - Cache dirs managed by `just clear-vllm-caches`: `~/.cache/{vllm,triton,
-  torchinductor,aiter,comgr,tvm-ffi,tilelang}` (huggingface kept: model weights).
+  torchinductor,aiter,comgr,tvm-ffi,tilelang}` plus the vllm-vision
+  containers' `~/.cache/{triton,torchinductor,tilelang}_vision` (huggingface
+  kept: model weights).
 - Always clear caches after updating `VLLM_REF`/`VLLM_VERSION` or changing
   `AITER_REF` to avoid stale kernel artifacts causing runtime errors.
 
@@ -80,6 +95,10 @@ just --set model qwen3.6-27b up
   dying at exit leaves a stale aiter baton lock that deadlocks startup.
 - A stale baton lock (`~/.cache/aiter/jit/build/lock_*` referencing a dead
   PID/container) is not auto-cleared by aiter; `just prewarm` removes it first.
+- The `vllm-vision` container shares this aiter JIT dir with `vllm`
+  (deliberate: concurrent *readers* of built kernels are safe; only concurrent
+  *builds* race, and prewarm has already done the building). The other
+  compile caches are per-container (`*_vision` dirs) for the same reason.
 
 ### Version Pins
 - All build pins live in `.env` (untracked) and `.env.example` (tracked template).

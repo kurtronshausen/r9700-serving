@@ -8,7 +8,7 @@ import base64, io, json, requests
 
 from PIL import Image, ImageDraw
 
-BASE = "http://localhost:8180/v1"
+BASE = "http://localhost:8000/v1"
 MODEL = "qwen3.8-27b"
 
 
