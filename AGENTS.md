@@ -211,13 +211,23 @@ touches one of:
      default — the 2-byte KV halves tokens-per-block; see
      `vllm:cache_config_info`), so hits are 0% whenever
      `floor((prompt_len-1)/832)*832 > shared_prefix_len` — measured **0% on
-     the qwen3.8-27b multi-turn probe (2026-08-20, fp8; re-confirmed 2026-08-22
-     on bf16-KV, still 0% across 4 turns)**. Fix in flight, none
-    merged: `#52527` (metrics for shared-prefix tokens lost to missing
-    checkpoints), `#52789` (internal prefill checkpoints, 9–25% TTFT),
-    `#48815` (MTP align retention). **When one merges**: carry it as a local
-    patch only if the current `VLLM_REF` release does not already contain it —
-    if it's in an available vLLM bump, prefer the bump (step 5), not a patch.
+      the qwen3.8-27b multi-turn probe (2026-08-20, fp8; re-confirmed 2026-08-22
+      on bf16-KV, still 0% across 4 turns; extended 2026-08-23 to 30 turns /
+      2263 tokens spanning 3 blocks — still 0%, which also refutes the Marconi
+      detection-lag hypothesis of ~3 misses/group. Note the server's cumulative
+      `vllm:prefix_cache_hits_total` is non-zero (~1.3M): caching *does* hit on
+      repeated-identical-prompt bench workloads, but never on this incremental-
+      history probe — the failure is specific to the incremental shared-prefix
+      pattern, not a global no-op)**. Fixes in flight: `#52527`
+     (metrics for shared-prefix tokens lost to missing checkpoints),
+     `#48815` (MTP align retention) — both still open. `#52789` (internal
+     prefill checkpoints, 9–25% TTFT) **merged 2026-08-22** (`9eb9d9d`) but
+     postdates the v0.28.0rc2 tag (2026-08-21), so it is main-only; the bulk of
+     its diff is Kimi-K3/FlashKDA-specific and it is a TTFT win for existing
+     hits, not a fix for the 0%-hit geometry above — not worth cherry-picking
+     onto rc2. **When a real fix merges**: carry it as a local patch only if
+     the current `VLLM_REF` release does not already contain it — if it's in an
+     available vLLM bump, prefer the bump (step 5), not a patch.
   - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
     prefix hit (832 tokens here on the bf16-KV default; was 1600 on fp8),
     bounding the prefix-cache win for MTP even after `#45238` is fixed. Monitor
@@ -236,7 +246,13 @@ Issues known **not** to apply (checked; re-check only if the stack changes):
 NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
 MTP), non-Qwen models (#52833/#48568 GLM, #51530 DeepSeek), or paths not
 reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
-#51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52793 (fp8 KV scale-1.0 on
+#51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52688/#53397 (multi-layer MTP
+spec_step_idx — all K draft steps re-execute layers[0]; both 27B models have
+`mtp_num_hidden_layers=1`, so layer-0-only is correct and N/A). #53136 (ROCm
+all-reduce 8–16 MiB dead zone → RCCL generic-kernel launch fault; requires
+`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION` and the fault was gfx942 TP=8-specific —
+we never set QUICK_REDUCE and gfx1201 TP=2 is stable; re-check only if that
+changes). #52793 (fp8 KV scale-1.0 on
 hybrids) was previously logged as a "non-issue" because a d200K/d256K probe
 passed coherence at 258k tokens. **Revisited 2026-08-22**: the stock FP8
 checkpoints ship no k/v/q scales, so fp8 KV serves at scale 1.0, and a
