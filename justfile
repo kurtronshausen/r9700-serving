@@ -13,6 +13,15 @@ model := env_var_or_default('MODEL_PROFILE', 'qwen3.8-27b')
 # Exported so compose can resolve the `env_file:` path for the model profile.
 export MODEL_PROFILE := model
 
+# Vision model profile: selects env/${vision_model}.env for the `vllm-vision`
+# service (a second, concurrent container on its own port and cache dirs).
+# Override with `just --set vision_model <profile>` or
+# `VISION_MODEL_PROFILE=<profile> just <recipe>`.
+vision_model := env_var_or_default('VISION_MODEL_PROFILE', 'qwen2.5-vl-72b-instruct')
+
+# Exported so compose can resolve the `env_file:` path for the vision profile.
+export VISION_MODEL_PROFILE := vision_model
+
 # Every compose call must load `.env` (build pins) plus the env_file stack
 # that compose.yaml declares (common → aiter → qwen3.6 → profile), because
 # passing --env-file disables the implicit .env resolution, so each must be
@@ -30,19 +39,21 @@ check:
         printf 'error: no .env found. Copy the template: cp .env.example .env\n' >&2
         exit 1
     fi
-    profile="env/{{model}}.env"
-    if [ ! -r "$profile" ]; then
-        printf 'error: no such model profile: %s\n' "$profile" >&2
-        printf 'available profiles:\n' >&2
-        for f in env/*.env; do
-            case "$f" in env/aiter-*) continue ;; esac
-            printf '  %s\n' "$(basename "$f" .env)" >&2
-        done
-        exit 1
-    fi
+    for p in "env/{{model}}.env" "env/{{vision_model}}.env"; do
+        if [ ! -r "$p" ]; then
+            printf 'error: no such model profile: %s\n' "$p" >&2
+            printf 'available profiles:\n' >&2
+            for f in env/*.env; do
+                case "$f" in env/aiter-*|env/*.common) continue ;; esac
+                printf '  %s\n' "$(basename "$f" .env)" >&2
+            done
+            exit 1
+        fi
+    done
     {{compose}} config --quiet
-    printf 'Config OK (profile: {{model}}, model: %s).\n' \
-        "$(grep -m1 '^VLLM_MODEL=' "$profile" | cut -d= -f2-)"
+    printf 'Config OK (model: %s, vision: %s).\n' \
+        "$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2-)" \
+        "$(grep -m1 '^VLLM_MODEL=' "env/{{vision_model}}.env" | cut -d= -f2-)"
 
 # Ensure the whole-home mount sources exist and are owned by the current user.
 # Docker's daemon pre-creates missing bind-mount sources as root, which breaks
@@ -86,6 +97,10 @@ clear-vllm-caches:
         "$HOME/.cache/comgr"
         "$HOME/.cache/tvm-ffi"
         "$HOME/.cache/tilelang"
+        # vllm-vision service's per-container compile caches
+        "$HOME/.cache/triton_vision"
+        "$HOME/.cache/torchinductor_vision"
+        "$HOME/.cache/tilelang_vision"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -172,11 +187,19 @@ up: check ensure-cache-dirs prewarm ensure-kvscales
     #!/usr/bin/env bash
     set -euo pipefail
     served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
+    # Host ports are overridable in .env (PORT / VISION_PORT); compose defaults
+    # are 8000 (vllm) and 8001 (vllm-vision).
+    port="$(grep -m1 '^PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    port="${port:-8000}"
+    vision_port="$(grep -m1 '^VISION_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    vision_port="${vision_port:-8001}"
+    # Starts BOTH services (`vllm` + `vllm-vision`); the vision container
+    # keeps loading in the background while we wait on the main one.
     {{compose}} up -d
     printf 'Waiting for server to be ready ...\n'
     ready=0
     for _ in $(seq 1 150); do
-        if curl -sf --max-time 3 http://localhost:8180/health > /dev/null 2>&1; then
+        if curl -sf --max-time 3 "http://localhost:${port}/health" > /dev/null 2>&1; then
             ready=1
             break
         fi
@@ -187,22 +210,30 @@ up: check ensure-cache-dirs prewarm ensure-kvscales
         exit 1
     fi
     printf 'Warming up Triton kernels ...\n'
-    if curl -sf --max-time 300 http://localhost:8180/v1/chat/completions \
+    if curl -sf --max-time 300 "http://localhost:${port}/v1/chat/completions" \
         -H 'Content-Type: application/json' \
         -d "{\"model\":\"${served_name}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}],\"max_tokens\":100,\"temperature\":0}" \
         > /dev/null; then
-        printf 'Warmup complete. Serving %s at http://localhost:8180/v1\n' "$served_name"
+        printf 'Warmup complete. Serving %s at http://localhost:%s/v1\n' "$served_name" "$port"
     else
         printf 'error: warmup request failed. Run `just logs`.\n' >&2
         exit 1
     fi
+    printf 'Vision profile %s starting at http://localhost:%s/v1 (large model —\n' "{{vision_model}}" "$vision_port"
+    printf 'check readiness with `just logs vllm-vision` or `just compose ps`).\n'
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:
     @{{compose}} exec vllm {{args}}
 
-logs:
-    @{{compose}} logs -f
+# `just logs` follows all services; `just logs vllm-vision` one of them.
+logs *args:
+    @{{compose}} logs -f {{args}}
+
+# Raw compose passthrough for service-level ops
+# (e.g. `just compose up -d vllm`, `just compose ps`, `just compose down vllm-vision`).
+compose *args:
+    @{{compose}} {{args}}
 
 bench: check
     #!/usr/bin/env bash
@@ -210,8 +241,10 @@ bench: check
     model="$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2-)"
     served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
     tokenizer="$(grep -m1 '^VLLM_TOKENIZER=' "env/{{model}}.env" | cut -d= -f2-)"
+    port="$(grep -m1 '^PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    port="${port:-8000}"
     printf 'Benchmarking %s (pp2048, tg32+128) ...\n\n' "$model"
-    uvx llama-benchy@0.4.0 --base-url http://localhost:8180/v1 \
+    uvx llama-benchy@0.4.0 --base-url "http://localhost:${port}/v1" \
         --model "$served_name" \
         --tokenizer "$tokenizer" \
         --pp 2048 \

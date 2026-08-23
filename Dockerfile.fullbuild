@@ -231,6 +231,11 @@ WORKDIR /workspace
 # The container runs as the host user (compose `user:`); make cwd writable.
 RUN chmod 777 /workspace
 
-EXPOSE 8180
+EXPOSE 8000
 
-ENTRYPOINT ["vllm", "serve"]
+# All server arguments are assembled from the service environment at startup
+# (see compose.yaml env_file stacks); compose services set no `command:`.
+COPY ./entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
