@@ -168,6 +168,9 @@ restart anyway).
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
+- **`--enable-prompt-tokens-details`**: include the `prompt_tokens_details`
+  breakdown (cached/text/image/audio/video) in API responses so front-ends like
+  LiteLLM can attribute cache hits for accurate cost tracking.
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
   **`--gpu-memory-utilization 0.95`**. **`--max-num-seqs`** defaults to `2`

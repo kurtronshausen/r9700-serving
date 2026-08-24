@@ -40,6 +40,7 @@ exec vllm serve \
     --max-model-len "${VLLM_MAX_MODEL_LEN:-131072}" \
     --max-num-batched-tokens "${VLLM_MAX_BATCHED_TOKENS:-8192}" \
     --enable-prefix-caching \
+    --enable-prompt-tokens-details \
     --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}' \
     --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL:-0.95}" \
     --host 0.0.0.0 \
