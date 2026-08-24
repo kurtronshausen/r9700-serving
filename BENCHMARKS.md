@@ -8,12 +8,12 @@ per-run files in [`archive/benchmarks/`](archive/benchmarks/).
 
 ## Setup (current)
 
-vLLM 0.27.1 + local patches (see README "Source-build patches"), torch 2.13,
+vLLM 0.28.0rc2 + local patches (see README "Source-build patches"), torch 2.13,
 triton 3.8.0, ROCm 7.14.0, AITER v0.1.20 unified attention, froggeric chat
-template v22.3, thinking off. `-tp 2`, `--gpu-memory-utilization 0.85`,
-`GPU_MAX_HW_QUEUES=1`. fp8 KV is the default on the dense profiles; 35B-A3B
-runs bf16 KV. `--max-num-seqs 2` on the MTP profiles (the #35288 cap);
-`--max-num-batched-tokens 4096` on 35B-A3B.
+template v22.3, thinking off. `-tp 2`, `--gpu-memory-utilization 0.92`,
+`GPU_MAX_HW_QUEUES=1`. **bf16 KV** is the default on all profiles (fp8 KV is
+opt-in via `VLLM_KV_CACHE_DTYPE=fp8`); `--max-num-seqs 2` everywhere (the
+#35288 cap); `--max-num-batched-tokens 4096` on 35B-A3B.
 
 Single-request numbers are invariant to `--max-num-seqs`; long-context
 concurrency degrades sharply (see the c1-vs-c2 head-to-head in
@@ -23,6 +23,13 @@ concurrency degrades sharply (see the c1-vs-c2 head-to-head in
 
 | file | contents |
 |:-----|:---------|
+| [`benchmarks/2026-08-23_qwen3.8-27b_depth_full_bf16.md`](benchmarks/2026-08-23_qwen3.8-27b_depth_full_bf16.md) | Qwen3.8-27B full depth sweep, bf16 KV default (current stack) |
+| [`benchmarks/2026-08-23_qwen3.8-27b_depth_conc_bf16.md`](benchmarks/2026-08-23_qwen3.8-27b_depth_conc_bf16.md) | Qwen3.8-27B depth + concurrency sweep, bf16 KV default |
+| [`benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md`](benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md) | Qwen3.8-27B depth sweep after the bf16-KV default switch |
+| [`benchmarks/2026-08-22_qwen3.8-27b_depth_bf16_fp8.md`](benchmarks/2026-08-22_qwen3.8-27b_depth_bf16_fp8.md) | depth A/B: bf16 KV vs calibrated fp8 KV |
+| [`benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md`](benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md) | MTP3 vs DFlash2 depth + concurrency-at-depth A/B (DFlash rejection) |
+| [`benchmarks/2026-08-22_kv_calibration_quality_ab.md`](benchmarks/2026-08-22_kv_calibration_quality_ab.md) | calibrated vs scale-1.0 fp8 KV: PPL + long-context recall A/B |
+| [`benchmarks/2026-08-22_lifted_tested.md`](benchmarks/2026-08-22_lifted_tested.md) | external repos lifted-and-tested; fp8 KV scale-1.0 calibration run |
 | [`benchmarks/08_21_qwen3.8-27b_dflash2_bench.md`](benchmarks/08_21_qwen3.8-27b_dflash2_bench.md) | Qwen3.8-27B d0 with DFlash2 drafter (V2 runner; tg32 ~88 t/s vs MTP3 ~62) |
 | [`benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md`](benchmarks/08_21_qwen3.8-27b_v0.28.0rc2_bench.md) | Qwen3.8-27B d0 on vLLM 0.28.0rc2 bump (MTP3, no regression; prefix probe 0%) |
 | [`benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md`](benchmarks/08_19_qwen3.8-27b_fp8kv_mtp3_patches_bench.md) | Qwen3.8-27B d0 + depth, vLLM 0.27.1 + 3 local patches |

@@ -7,27 +7,32 @@ OpenAI-compatible API.
 ## Requirements
 
 - Docker with the Compose plugin (`docker compose`), or Podman (`podman
-  compose`); `just` recipes default to Docker
+  compose`); `just` recipes default to Docker (Podman caveats below)
 - [`just`](https://just.systems/)
 - [`git`](https://git-scm.com/) (to fetch the source)
 - SELinux hosts need no special relabeling: bind mounts mount unlabeled because
   the container runs with `label=disable`
 - One or more R9700 GPUs; the included configuration assumes two
 
+**Podman caveats** (verified on podman 5.7 / buildah 1.42):
+- Runtime ops (`up`/`down`/`logs`/`run`/`exec`) need the podman API service
+  running — `systemctl --user enable --now podman.socket` (or
+  `podman system service &`). Without it, `podman compose` fails to connect
+  to `/run/user/$UID/podman/podman.sock`. `just check` (config only) works
+  without it.
+- Builds work, but buildah silently ignores `RUN --mount=type=cache` (the
+  target dir is pre-created but not shared across steps), so `just rebuild`
+  loses pip/ccache cache reuse and runs slower than the Docker estimate.
+
 ## Quick start
 
-Get the source (skip if you already have the repo checked out):
+Get the source (skip if you already have the repo checked out; all commands
+below run from inside it):
 
 ```sh
-# Install git if you don't have it (Debian/Ubuntu: apt install git,
-# Fedora: dnf install git, Arch: pacman -S git)
 git clone https://github.com/prcoe1/r9700-serving.git
 cd r9700-serving
 ```
-
-(`git clone` downloads a full copy of the repository, including its version
-history, into a new `r9700-serving/` directory; `cd` then moves into it. All
-commands below run from inside that directory.)
 
 ```sh
 cp .env.example .env  # Build version pins + default model profile (untracked)
@@ -40,10 +45,10 @@ just logs        # Follow service logs
 just down        # Stop and remove containers
 ```
 
-To use Podman: `just --set runtime podman build` or `RUNTIME=podman just up`.
-Run `just --list` to see all recipes including `rebuild` (force-rebuild) and
-`clear-vllm-caches` (wipe host-side Triton/Inductor/AITER caches; preserves
-HuggingFace model cache).
+To use Podman: `just --set runtime podman build` or `RUNTIME=podman just up`
+(see the Podman caveats in Requirements). Run `just --list` to see all recipes
+including `rebuild` (force-rebuild) and `clear-vllm-caches` (wipe host-side
+Triton/Inductor/AITER caches; preserves the HuggingFace model cache).
 
 Always go through `just`: `compose.yaml` interpolates the model arguments from
 `env/<profile>.env`, which the recipes pass to compose via `--env-file`. A bare
@@ -95,19 +100,15 @@ Runtime environment is split across files:
 
 All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
 (`chat-templates/qwen.jinja`, pinned to **v22.3** — `qwen3.8-froggeric-v22.3`,
-fetched from the repo's `main`). It is applied to every model via
-`--chat-template` in `compose.yaml`, overriding each model's bundled template.
-The template fixes rendering bugs, KV-cache invalidation, token waste, and
-agentic stalling in the official Qwen templates, and adds tool-error retry
-warnings plus optional `tool_call_format="json"` / reasoning-effort steering
-(`reasoning_effort`) kwargs. Thinking is partitioned into the `reasoning` field
-and the final answer into `content`; `--reasoning-parser qwen3` (see below) is
-required for the split to work.
-
-Since **v22.3**, history re-rendering is byte-identical to generated tokens for
-thinking-off turns (past ` thinking` blocks are always preserved, even when
-empty), which keeps `--enable-prefix-caching` hits intact across multi-turn
-conversations — this stack runs thinking-off by default.
+fetched from the repo's `main`). It is applied to every model via `--chat-template` in `compose.yaml`,
+overriding each model's bundled template. It fixes rendering bugs, KV-cache
+invalidation, and token waste in the official Qwen templates, and adds
+tool-error retry warnings plus `tool_call_format` / `reasoning_effort` kwargs.
+Since **v22.3**, history re-rendering is byte-identical to generated tokens on
+thinking-off turns, which keeps `--enable-prefix-caching` hits intact across
+multi-turn conversations (this stack runs thinking-off). Thinking is
+partitioned into the `reasoning` field and the answer into `content`;
+`--reasoning-parser qwen3` is required for the split.
 
 Refresh the overlay from upstream when a newer version ships (compare the
 `template_version` line of `chat-templates/qwen.jinja` against the repo's
@@ -128,63 +129,35 @@ restart anyway).
 
 - **`--enable-auto-tool-choice --tool-call-parser qwen3_coder
   --reasoning-parser qwen3`** (`VLLM_TOOL_CHOICE`, all profiles): OpenAI
-  tool-calling with Qwen's `qwen3_coder` parser. `--reasoning-parser qwen3` is
-  required for the Qwen chat template to correctly split thinking
-  into the `reasoning` field.
-- **`--limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'`**: multimodal
-  images allowed, audio/video disabled.
+  tool-calling with Qwen's `qwen3_coder` parser; `--reasoning-parser qwen3` is
+  required for the template's `reasoning`/`content` split.
+- **`--limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'`**: images
+  allowed, audio/video disabled. Caveat: 2+ large images in one prompt can
+  deadlock the engine on these GDN hybrids (upstream #40707, fix not merged —
+  see the AGENTS.md watchlist).
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
-- **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
-- **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
-  `262144` for 256K contexts), **`-tp 2`**,
-  **`--gpu-memory-utilization 0.92`** (`VLLM_GPU_MEM_UTIL`, was `0.95`; the
-  lower default leaves VRAM headroom for co-tenants sharing the GPUs, e.g. the
-  whisper.cpp Vulkan server on GPU0 — raise it back if the GPUs are
-  single-tenant). **`--max-num-seqs`** defaults to `2` (`compose.yaml`), the
-  universal #35288 cap, and `qwen3.6.env.common` sets the same `2` explicitly
-  so the cap stays visible per profile (see "MTP concurrency bug").
- - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`, default `bfloat16`).
-   bf16 KV is now the default across all Qwen profiles. The AITER BF16 LDS-fit
-   patch (`patches/aiter/unified-attention-bf16-kv.patch`), which caps
-   `TILE_SIZE` and `attn_stages` to fit 64 KiB LDS, is required for it. Prior
-   "garbage" output was caused by MTP token loops (see
-   [`archive/DEADENDS.md`](archive/DEADENDS.md)), not the patch. To opt back into
-   fp8 KV, set `VLLM_KV_CACHE_DTYPE=fp8` (halves KV-cache memory, useful when
-   context length is the constraint).
- - **fp8 KV is the opt-in path; when used, the calibrated copy matters.** The
-   stock `Qwen3.8-27B-FP8`/`Qwen3.6-27B-FP8` checkpoints ship no
-   `k_scale`/`v_scale`/`q_scale`, so vLLM ≥0.28 (which removed
-   `--calculate-kv-scales`) would otherwise serve fp8 KV at **scale 1.0** (boot
-   log: `Using KV cache scaling factor 1.0 for fp8_e4m3`). Scale 1.0 is
-   miscalibrated — a calibration run records deep-layer V amax up to **~130-132**
-   (layer 63) vs the ~1-24 range scale 1.0 assumes, wasting the e4m3 dynamic
-   range. The calibrated copy (`~/models-local/<model>-kvscales`, built by
-   `just up` -> `ensure-kvscales` via `tools/setup_kvscales.py` +
-   `tools/calibrate_kv_scales.py`) covers the main full-attention layers **and
-   the MTP prediction-head layer(s)** (`mtp.layers.*`, which caches fp8 KV
-   separately). Measured effect: calibrated vs scale-1.0 diverge ~20-27% (scale
-   1.0 corrupts KV numerics), no throughput regression. Recalibrate with
-   `just clear-kvscales` then `just up`. Note the 2026-08-22 quality A/B
-   (`benchmarks/2026-08-22_kv_calibration_quality_ab.md`) found calibrated vs
-   scale-1.0 **indistinguishable** on both PPL and long-context recall, so
-   calibration is a correctness fix, not a measured quality win — hence bf16 is
-   the safer default.
+- **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes (known
+  limitations on this hybrid — AGENTS.md watchlist).
+- **`--max-model-len`** (default `131072`; Qwen3.8-27B overrides to `262144`),
+  **`-tp 2`**, **`--gpu-memory-utilization 0.92`** (`VLLM_GPU_MEM_UTIL`, was
+  0.95; the lower default leaves VRAM headroom for GPU co-tenants — raise it
+  if the GPUs are single-tenant), **`--max-num-seqs 2`** (the universal #35288
+  cap, set explicitly per profile to keep it visible).
+- **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`, default `bfloat16`
+  on all profiles; the AITER BF16 LDS-fit patch
+  `patches/aiter/unified-attention-bf16-kv.patch` is required). Opting into fp8
+  KV (`VLLM_KV_CACHE_DTYPE=fp8`) halves KV memory and automatically serves the
+  calibrated local copy built by `just up` (`ensure-kvscales`): the stock
+  checkpoints ship no KV scales, and uncalibrated scale-1.0 is miscalibrated.
+  Calibration is a correctness fix, not a measured quality win — see the
+  `#52793` note in AGENTS.md and
+  [`benchmarks/2026-08-22_kv_calibration_quality_ab.md`](benchmarks/2026-08-22_kv_calibration_quality_ab.md).
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B — see
-  [`archive/DEADENDS.md`](archive/DEADENDS.md)).
-- **MTP3 is the Qwen3.8-27B default.** DFlash2 was tried and rejected: a clean
-  2026-08-22 depth A/B on the same calibrated build showed DFlash2's decode win
-  is short-context only (MTP3 holds ~50-60 t/s out to d64K and ~37@d128K vs
-  DFlash2 37/24/15, with far lower variance). See
-  [`archive/DEADENDS.md`](archive/DEADENDS.md) and
-  [`benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md`](benchmarks/2026-08-22_qwen3.8-27b_fp8kv_depth_mtp3_dflash.md).
-- **PCIe P2P must stay disabled on this host.** `NCCL_P2P_DISABLE=1` is
-  required: the two R9700s sit on separate PCIe root ports, and enabling P2P
-  (`NCCL_P2P_DISABLE=0`, even with `HSA_ENABLE_IPC_MODE_LEGACY=0`) collapses
-  DFlash decode from ~92 t/s to ~9 t/s (10× regression) despite RCCL
-  establishing P2P channels. `HSA_ENABLE_IPC_MODE_LEGACY` is irrelevant once
-  P2P is off. This also rules out the P2P all-reduce HIP kernels on this box.
+  (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B). MTP3 is
+  the Qwen3.8-27B default: DFlash2's decode win is short-context only (it
+  decays hard with depth) and was rejected after a 2026-08-22 depth A/B — see
+  [`archive/DEADENDS.md`](archive/DEADENDS.md).
 
 ### Runtime overlays (bind-mounted source fixes)
 
@@ -193,37 +166,27 @@ Version-locked patches applied at runtime by read-only bind-mounts in
 the pinned dependency.
 
 - **Tolerate empty `tools` arrays** (`patches/vllm/protocol.py`, pinned to
-  `VLLM_REF` v0.28.0rc2): some clients send `{"tools": [], "tool_choice": "none"}`
-  on chat completions, which upstream vLLM's `check_tool_usage` rejects with a
-  400 (it treats any empty tools array as malformed, even when `tool_choice` is
-  `"none"`). The overlay of
-  `vllm/entrypoints/openai/chat_completion/protocol.py` treats `tools: []` as a
-  no-tools request when `tool_choice` is `"none"`/omitted, while still rejecting
-  genuinely invalid combos (`auto`/`required`/named tool_choice with empty
-  tools).
+  `VLLM_REF` v0.28.0rc2): some clients send `{"tools": [], "tool_choice":
+  "none"}`, which upstream rejects with a 400. The overlay treats `tools: []`
+  as a no-tools request when `tool_choice` is `"none"`/omitted, while still
+  rejecting genuinely invalid combos.
 
 ### Source-build patches (applied at image build time)
 
-Local backport of an upstream fix not in `VLLM_REF` v0.28.0rc2. Applied by
+Local backport of an upstream fix not in `VLLM_REF` v0.28.0rc2, applied by
 `Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the aiter patch
-loop). Verified to apply cleanly on the v0.28.0rc2 tree; re-verify when
-bumping `VLLM_REF`.
-
-(#51812 GDN spec-gate alignment and #51837 ROCm KV-first page separation were
-carried as patches on v0.27.1; both merged upstream 2026-08-11 and are in
-v0.28.0rc2, so their patches were dropped with the bump.)
+loop). Re-verify each patch applies cleanly on the new ref when bumping
+`VLLM_REF`. (#51812/#51837 were carried as patches on v0.27.1, merged upstream
+2026-08-11, and dropped with the v0.28.0rc2 bump.)
 
 - **Honor `drop_eagle_block` in `MambaManager`**
   (`patches/vllm/48375-mamba-drop-eagle-block.patch`,
-  [#48375](https://github.com/vllm-project/vllm/pull/48375), adapted for
-  v0.28.0rc2): `MambaManager.find_longest_cache_hit` accepted `drop_eagle_block`
-  and ignored it, so on hybrid GDN models with MTP/EAGLE + prefix caching the
-  final matched page of a cache hit could hold recurrent state written over
-  draft positions that verification later rejects — silent corruption that
-  cache hits then spread to every later request sharing the prefix (#43559,
-  #50188). Fix lowers the search ceiling by one page (a literal pop would
-  delete Mamba's rightmost real state block). Still open upstream; carried as
-  a local patch.
+  [#48375](https://github.com/vllm-project/vllm/pull/48375), open upstream):
+  without it, MTP + prefix caching on hybrid GDN models can leave the final
+  matched page holding recurrent state written over draft positions that
+  verification later rejects — silent corruption spread to every later request
+  sharing the prefix (#43559, #50188). The fix lowers the cache-hit search
+  ceiling by one page.
 
 ### Runtime env knobs
 
@@ -232,9 +195,9 @@ and `env/2xr9700.vllm.common` (loaded via `env_file`):
 
 | var | value | why |
 |:----|:------|:----|
-| `GPU_MAX_HW_QUEUES` | `1` | avoids RDNA4 decode regression (see tuning) |
-| `NCCL_P2P_DISABLE` | `1` | two GPUs on separate PCIe root ports |
-| `NCCL_MIN/MAX_NCHANNELS` | `4` | bandwidth sweet spot (see tuning) |
+| `GPU_MAX_HW_QUEUES` | `1` | required: multiple queues cause a 55-63% decode regression on RDNA4 |
+| `NCCL_P2P_DISABLE` | `1` | required on this host: the GPUs sit on separate PCIe root ports, and enabling P2P collapses decode ~10× even though RCCL establishes P2P channels (also rules out the P2P all-reduce HIP kernels) |
+| `NCCL_MIN/MAX_NCHANNELS` | `4` | bandwidth sweet spot for two PCIe 5.0 x8 root ports, P2P off (data in BENCHMARKS.md) |
 | `HSA_ENABLE_IPC_MODE_LEGACY` | `1` | needed for the ROCm stack |
 | `HSA_NO_SCRATCH_RECLAIM` | `1` | avoid scratch reallocation stalls |
 | `HIP_FORCE_DEV_KERNARG` | `1` | force device-side kernel args |
@@ -254,18 +217,11 @@ only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
 
 Key tuning decisions:
 - **MTP speculative decoding** (dense profiles): MTP4 on Qwen3.6-27B (~72%
-  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (tg32 72.1 on the
-  current fp8-KV stack; bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4
-  49.2, no-MTP 32.0) because its MTP head accepts drafts poorly past position 3,
-  so more drafts waste compute and fewer lose throughput. MTP is **disabled on
-  35B-A3B** (pending a re-test after the upstream #47087 fix — see
-  [`archive/DEADENDS.md`](archive/DEADENDS.md)).
-- **`GPU_MAX_HW_QUEUES=1`** is required. Multiple queues cause a 55-63% decode
-  throughput regression on RDNA4 — one queue per process avoids kernel launch
-  scheduling overhead.
-- **NCCL channels pinned to 4** (`NCCL_MIN_NCHANNELS=NCCL_MAX_NCHANNELS=4`):
-  the bandwidth sweet spot for two GPUs on separate PCIe 5.0 x8 root ports with
-  P2P disabled.
+  acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (its MTP head
+  accepts drafts poorly past position 3, so more drafts waste compute —
+  bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4 49.2, no-MTP 32.0
+  tg32). MTP is **disabled on 35B-A3B** (pending a re-test after the upstream
+  #47087 fix — see [`archive/DEADENDS.md`](archive/DEADENDS.md)).
 - **bf16 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=bfloat16`): higher
   KV fidelity than fp8. It uses more K/V bytes than fp8, so fp8 (with the
   calibrated-copy scale fix, halving KV memory) remains the option when context
@@ -288,21 +244,15 @@ Key tuning decisions:
 - **`--max-num-batched-tokens 4096`** is required for the MoE model (its
   gated-delta layers force an attention block size of 2112 tokens).
 
-### MTP concurrency bug (dense profiles)
+### MTP concurrency bug
 
-The one upstream bug currently affecting this stack:
-[#35288](https://github.com/vllm-project/vllm/issues/35288) — MTP spec-decode
-produces corrupted output when 4+ decode sequences share a batch (garbage
-header → repetition loop → `max_tokens`).
-
-**Workaround**: `--max-num-seqs` is capped at `2` — the `compose.yaml` default
-is `2` for all profiles, and `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2`
-explicitly to keep the cap visible — so vLLM never forms a ≥4-sequence decode
-batch; concurrent decode stays below the corruption threshold regardless of
-incoming concurrency. Verified with the
-#35288 repro (4/6/8 concurrent requests → all coherent) and the 400-request
-stress test. Dense MTP stays enabled (MTP4 on Qwen3.6-27B, MTP3 on
-Qwen3.8-27B); 35B-A3B runs MTP disabled.
+[#35288](https://github.com/vllm-project/vllm/issues/35288): MTP spec-decode
+corrupts output when 4+ decode sequences share a batch (garbage header →
+repetition loop → `max_tokens`). **Workaround**: `--max-num-seqs 2` everywhere
+(compose default + explicit per profile), so the batch never reaches the
+threshold — verified with the #35288 repro (4/6/8 concurrent requests → all
+coherent) and the 400-request stress test. See the AGENTS.md watchlist for
+status.
 
 ### Upstream issues
 
@@ -315,17 +265,11 @@ stale triage snapshots live in
 ## Performance
 
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
-the local patch under "Source-build patches" (#48375), torch 2.13, triton 3.8.0
-(ROCm 7.14.0), tuned MoE/dense GEMM configs. The Qwen3.8-27B row is the
-current default stack (**MTP3**, 256K context, **bf16 KV**; measured 2026-08-22
-after the bf16 default switch). MTP3 was
-made the default over DFlash2 after the 2026-08-22 depth A/B: MTP3 holds decode
-far better at depth (tg32 60@d32K, 52@d64K, 37@d128K vs DFlash 37/24/15) at the
-cost of short-context decode (MTP3 tg32 ~53-60 vs DFlash ~88 @d0). The other rows are the
-latest available measurements for those profiles (2026-08-12, pre-patch
-build).
-Full methodology, per-run files, and upgrade history in
-[`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
+the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
+Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
+KV**, 2026-08-22). The other rows are the latest available measurements for
+those profiles (2026-08-12, pre-patch build). Full methodology, per-run files,
+and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|

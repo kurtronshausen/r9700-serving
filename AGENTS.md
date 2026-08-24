@@ -17,7 +17,7 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just up` | start the vLLM server (runs `check`, `ensure-cache-dirs`, `prewarm`, starts container, waits for readiness, runs warmup) |
 | `just prewarm` | build shared aiter JIT kernels in one throwaway container (runs automatically before every `up`) |
 | `just bench` | benchmark the selected model via `llama-benchy` (pp2048, tg32+128) |
-| `just logs` | follow container logs (`docker compose logs -f`) |
+| `just logs` | follow container logs (compose `logs -f`) |
 | `just down` | stop and remove the container |
 | `just exec <cmd>` | run a command inside the running container (e.g. `just exec bash`) |
 | `just ensure-cache-dirs` | pre-create host cache dirs owned by the current user |
@@ -89,8 +89,20 @@ just --set model qwen3.6-27b up
   - `FLASH_ATTN_REF` — flash attention (commit pin)
   - `TORCH_VERSION` / `TORCHVISION_VERSION` — PyTorch stack
 - If `just rebuild` terminates (signal 15 / timeout), check the image with
-  `docker inspect localhost/vllm-fullbuild:latest` to verify completion before
-  attempting `just up`.
+  `docker inspect localhost/vllm-fullbuild:latest` (or `podman inspect`) to
+  verify completion before attempting `just up`.
+
+### Podman (verified on podman 5.7 / buildah 1.42, docker-compose provider)
+- `just` takes a runtime: `RUNTIME=podman just up` / `just --set runtime
+  podman up`. `just check` (compose config) works out of the box.
+- Runtime ops (`up`/`down`/`logs`/`run`/`exec`) need the podman API service:
+  `systemctl --user enable --now podman.socket` (or `podman system service &`).
+  Without it, `podman compose` fails to connect to
+  `/run/user/$UID/podman/podman.sock`. `up`/`ps`/`down` were verified working
+  with the service running.
+- Builds work, but buildah silently ignores `RUN --mount=type=cache` (target
+  dirs are pre-created but not shared across steps), so `just rebuild` loses
+  pip/ccache cache reuse and runs slower than the Docker estimate above.
 
 ## Checking for Updates
 
@@ -202,32 +214,22 @@ touches one of:
     fixed and prefix caching actually hits — monitor post-fix
   - `#52520` align-mode admission livelock near KV-pool ceiling (open)
   - `#45238` hybrid prefix caching drops to 0% in align mode (open) — the
-    binding constraint on this stack. Root cause in v0.27.1:
-    `BlockPool.cache_full_blocks` skips Mamba align-mode null blocks
-    (block_pool.py, "Mamba models with prefix-caching in align mode"), so only
-    ~1 checkpoint hash per request is registered; a missing Mamba checkpoint
-     vetoes all attention-group hits (every group must hit). Live geometry:
-     `block_size=832` on the bf16-KV default (was `1600` on the old fp8-KV
-     default — the 2-byte KV halves tokens-per-block; see
-     `vllm:cache_config_info`), so hits are 0% whenever
-     `floor((prompt_len-1)/832)*832 > shared_prefix_len` — measured **0% on
-      the qwen3.8-27b multi-turn probe (2026-08-20, fp8; re-confirmed 2026-08-22
-      on bf16-KV, still 0% across 4 turns; extended 2026-08-23 to 30 turns /
-      2263 tokens spanning 3 blocks — still 0%, which also refutes the Marconi
-      detection-lag hypothesis of ~3 misses/group. Note the server's cumulative
-      `vllm:prefix_cache_hits_total` is non-zero (~1.3M): caching *does* hit on
-      repeated-identical-prompt bench workloads, but never on this incremental-
-      history probe — the failure is specific to the incremental shared-prefix
-      pattern, not a global no-op)**. Fixes in flight: `#52527`
-     (metrics for shared-prefix tokens lost to missing checkpoints),
-     `#48815` (MTP align retention) — both still open. `#52789` (internal
-     prefill checkpoints, 9–25% TTFT) **merged 2026-08-22** (`9eb9d9d`) but
-     postdates the v0.28.0rc2 tag (2026-08-21), so it is main-only; the bulk of
-     its diff is Kimi-K3/FlashKDA-specific and it is a TTFT win for existing
-     hits, not a fix for the 0%-hit geometry above — not worth cherry-picking
-     onto rc2. **When a real fix merges**: carry it as a local patch only if
-     the current `VLLM_REF` release does not already contain it — if it's in an
-     available vLLM bump, prefer the bump (step 5), not a patch.
+    binding constraint on this stack. Root cause:
+    `BlockPool.cache_full_blocks` skips Mamba align-mode null blocks, so only
+    ~1 checkpoint hash per request is registered and a missing Mamba
+    checkpoint vetoes every attention-group hit. Live geometry:
+    `block_size=832` on the bf16-KV default (was `1600` on fp8), so
+    incremental multi-turn prefixes never hit — measured **0% on the 30-turn
+    qwen3.8-27b probe (re-confirmed 2026-08-23)**. Note the cumulative
+    `vllm:prefix_cache_hits_total` is non-zero: caching *does* hit on
+    repeated-identical-prompt workloads — the failure is specific to the
+    incremental shared-prefix pattern, not a global no-op. Fixes in flight:
+    `#52527` (metrics), `#48815` (MTP align retention); `#52789` (internal
+    prefill checkpoints) merged 2026-08-22 but postdates the rc2 tag
+    (main-only, Kimi-K3/FlashKDA-specific TTFT win, not a fix for the 0%-hit
+    geometry — not worth cherry-picking). **When a real fix merges**: prefer
+    the version bump; carry a local patch only if no available release
+    contains it.
   - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
     prefix hit (832 tokens here on the bf16-KV default; was 1600 on fp8),
     bounding the prefix-cache win for MTP even after `#45238` is fixed. Monitor
@@ -252,36 +254,23 @@ spec_step_idx — all K draft steps re-execute layers[0]; both 27B models have
 all-reduce 8–16 MiB dead zone → RCCL generic-kernel launch fault; requires
 `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION` and the fault was gfx942 TP=8-specific —
 we never set QUICK_REDUCE and gfx1201 TP=2 is stable; re-check only if that
-changes). #52793 (fp8 KV scale-1.0 on
-hybrids) was previously logged as a "non-issue" because a d200K/d256K probe
-passed coherence at 258k tokens. **Revisited 2026-08-22**: the stock FP8
-checkpoints ship no k/v/q scales, so fp8 KV serves at scale 1.0, and a
-calibration run (see `benchmarks/2026-08-22_lifted_tested.md`) records deep-layer
-V amax up to ~132 vs scale 1.0's ~1-24 assumption — i.e. scale 1.0 is genuinely
-miscalibrated, not just unprecise. It does not cause coherence failures, but it
-does change KV numerics (calibrated vs scale-1.0 deterministic outputs diverge
- ~20-27%). **Made opt-in 2026-08-22**: the quality A/B
+changes). #52793 (fp8 KV scale-1.0 on hybrids): no coherence failures
+ (d258K probe passed), but the stock FP8 checkpoints ship no k/v/q scales, so
+ fp8 KV serves at scale 1.0, which is genuinely miscalibrated (deep-layer V
+ amax ~132 vs the ~1-24 range scale 1.0 assumes; calibrated vs scale-1.0
+ outputs diverge ~20-27%). The 2026-08-22 quality A/B
  (`benchmarks/2026-08-22_kv_calibration_quality_ab.md`) found calibrated and
- scale-1.0 fp8 KV **indistinguishable** on both PPL and long-context recall
- (PPL gap ~0.02-0.08%, direction flips with data; recall byte-identical), so
- calibration is a correctness fix, not a measured quality win — and **bf16 KV is
-  now the default** (`VLLM_KV_CACHE_DTYPE=bfloat16` in `compose.yaml` +
-  `env/qwen3.6.env.common`; `VLLM_GPU_MEM_UTIL=0.92`, lowered from 0.95 to
-  leave VRAM headroom for GPU co-tenants). When fp8 KV is re-enabled,
- the default profiles still point `VLLM_MODEL` at the calibrated local copy that
- `just up` builds via the `ensure-kvscales` recipe
- (`tools/setup_kvscales.py` + `tools/calibrate_kv_scales.py`, `amax/448`
- sidecar + index entries; recalibrate with `just clear-kvscales`), whose
- coverage includes the **MTP prediction-head layer(s)** (`mtp.layers.*`): the
- calibrator enables MTP spec-decode while capturing so the head's own full-attn
- layer(s) exist and get `mtp.layers.*.self_attn.attn.{q,k,v}_scale` too (they
- cache fp8 KV just like the main layers and were silently at scale 1.0). A
- residual `prob_scale 1.0` warning (kv_cache.py, fp8 attention) is separate from
- the KV cache scales — it's the softmax-probability scale for the fp8 attention
- kernel; q_scale is calibrated and consumed, prob_scale stays 1.0 by default and
- did not cause coherence issues at 258K. Re-visit scale calibration whenever KV
- precision matters (long-context recall), not just on coherence. Also
-checked 2026-08-21: #53180 (turboquant_k8v4 + MTP degeneration on hybrid
+ scale-1.0 fp8 KV **indistinguishable** on PPL and long-context recall — so
+ calibration is a correctness fix, not a measured quality win, and **bf16 KV
+ is the default**. When fp8 KV is re-enabled, the default profiles still point
+ `VLLM_MODEL` at the calibrated local copy that `just up` builds via
+ `ensure-kvscales` (recalibrate with `just clear-kvscales`), whose coverage
+ includes the **MTP prediction-head layer(s)** (`mtp.layers.*`, which cache
+ fp8 KV separately and were silently at scale 1.0). The residual `prob_scale
+ 1.0` warning is the fp8-attention softmax-probability scale, separate from
+ the KV cache scales, and caused no coherence issues at 258K. Re-visit
+ calibration whenever KV precision matters (long-context recall). Also
+ checked 2026-08-21: #53180 (turboquant_k8v4 + MTP degeneration on hybrid
 GDN — NVIDIA Ada/AWQ, we use fp8 KV; same silent-corruption family, so
 re-check if turboquant KV is ever tried), #52480 (qwen3_5_mtp TP≥2 load
 failure — NVFP4/ModelOpt checkpoints on NVIDIA; our FP8 MTP head loads fine
