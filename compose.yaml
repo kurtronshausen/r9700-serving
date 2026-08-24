@@ -98,6 +98,11 @@ services:
     # applies to ALL profiles, MTP-enabled or not, so the safe default lives here
     # (see --max-num-seqs below) rather than only in per-profile env. Raise only
     # after the upstream bug is addressed.
+    # NOTE: --gpu-memory-utilization defaults to 0.92 (was 0.95): other services
+    # share the GPUs (whisper.cpp Vulkan server on GPU0 via renderD128), so the
+    # lower target leaves ~2-3 GiB VRAM headroom per card. Raise to 0.95 when the
+    # GPUs are single-tenant (vLLM's boot log prints the equivalent utilization
+    # that would spend the remaining headroom on KV cache).
     command: >
       ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
@@ -110,7 +115,7 @@ services:
       --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
-      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.95}
+      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.92}
       --host 0.0.0.0
       --port 8180
       --dtype auto

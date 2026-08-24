@@ -265,8 +265,9 @@ does change KV numerics (calibrated vs scale-1.0 deterministic outputs diverge
  scale-1.0 fp8 KV **indistinguishable** on both PPL and long-context recall
  (PPL gap ~0.02-0.08%, direction flips with data; recall byte-identical), so
  calibration is a correctness fix, not a measured quality win — and **bf16 KV is
- now the default** (`VLLM_KV_CACHE_DTYPE=bfloat16` in `compose.yaml` +
- `env/qwen3.6.env.common`; `VLLM_GPU_MEM_UTIL=0.95`). When fp8 KV is re-enabled,
+  now the default** (`VLLM_KV_CACHE_DTYPE=bfloat16` in `compose.yaml` +
+  `env/qwen3.6.env.common`; `VLLM_GPU_MEM_UTIL=0.92`, lowered from 0.95 to
+  leave VRAM headroom for GPU co-tenants). When fp8 KV is re-enabled,
  the default profiles still point `VLLM_MODEL` at the calibrated local copy that
  `just up` builds via the `ensure-kvscales` recipe
  (`tools/setup_kvscales.py` + `tools/calibrate_kv_scales.py`, `amax/448`

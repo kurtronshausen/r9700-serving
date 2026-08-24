@@ -138,10 +138,12 @@ restart anyway).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes.
 - **`--max-model-len`** (default `131072`; the Qwen3.8-27B profile overrides to
   `262144` for 256K contexts), **`-tp 2`**,
-  **`--gpu-memory-utilization 0.95`**. **`--max-num-seqs`** defaults to `4`
-  (`compose.yaml`), but `qwen3.6.env.common` caps it to `2` on all Qwen
-  profiles to stay below the #35288 corruption threshold (see "MTP concurrency
-  bug").
+  **`--gpu-memory-utilization 0.92`** (`VLLM_GPU_MEM_UTIL`, was `0.95`; the
+  lower default leaves VRAM headroom for co-tenants sharing the GPUs, e.g. the
+  whisper.cpp Vulkan server on GPU0 — raise it back if the GPUs are
+  single-tenant). **`--max-num-seqs`** defaults to `2` (`compose.yaml`), the
+  universal #35288 cap, and `qwen3.6.env.common` sets the same `2` explicitly
+  so the cap stays visible per profile (see "MTP concurrency bug").
  - **`--kv-cache-dtype bfloat16`** (`VLLM_KV_CACHE_DTYPE`, default `bfloat16`).
    bf16 KV is now the default across all Qwen profiles. The AITER BF16 LDS-fit
    patch (`patches/aiter/unified-attention-bf16-kv.patch`), which caps
@@ -293,9 +295,11 @@ The one upstream bug currently affecting this stack:
 produces corrupted output when 4+ decode sequences share a batch (garbage
 header → repetition loop → `max_tokens`).
 
-**Workaround**: `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2`, so vLLM
-never forms a ≥4-sequence decode batch — concurrent decode stays below the
-corruption threshold regardless of incoming concurrency. Verified with the
+**Workaround**: `--max-num-seqs` is capped at `2` — the `compose.yaml` default
+is `2` for all profiles, and `env/qwen3.6.env.common` sets `VLLM_MAX_NUM_SEQS=2`
+explicitly to keep the cap visible — so vLLM never forms a ≥4-sequence decode
+batch; concurrent decode stays below the corruption threshold regardless of
+incoming concurrency. Verified with the
 #35288 repro (4/6/8 concurrent requests → all coherent) and the 400-request
 stress test. Dense MTP stays enabled (MTP4 on Qwen3.6-27B, MTP3 on
 Qwen3.8-27B); 35B-A3B runs MTP disabled.

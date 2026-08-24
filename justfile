@@ -175,7 +175,9 @@ up: check ensure-cache-dirs prewarm ensure-kvscales
     {{compose}} up -d
     printf 'Waiting for server to be ready ...\n'
     ready=0
-    for _ in $(seq 1 150); do
+    # Wait window matches the compose healthcheck start_period (600s): cold
+    # caches (fresh triton/compile state) can exceed 300s to become healthy.
+    for _ in $(seq 1 300); do
         if curl -sf --max-time 3 http://localhost:8180/health > /dev/null 2>&1; then
             ready=1
             break
@@ -183,7 +185,7 @@ up: check ensure-cache-dirs prewarm ensure-kvscales
         sleep 2
     done
     if [ "$ready" -ne 1 ]; then
-        printf 'error: server did not become ready within 300s. Run `just logs`.\n' >&2
+        printf 'error: server did not become ready within 600s. Run `just logs`.\n' >&2
         exit 1
     fi
     printf 'Warming up Triton kernels ...\n'
