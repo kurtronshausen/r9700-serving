@@ -190,7 +190,9 @@ touches one of:
 - **Known-bug watchlist** (search/check these before recommending a vLLM bump):
   - `#35288` MTP concurrency corruption (still mitigated by `max-num-seqs 2`)
   - `#47087` MTP token loops on Qwen3-MoE (resolved by #51113, in v0.27.1 —
-    pending 35B MTP re-test)
+    **re-test PASSED 2026-08-24**: MTP4 on 35B-A3B is clean on v0.28.0rc2 —
+    coherence PASSED + manual 512-token gen varied, ~2x decode win (tg32
+    194.9 vs 87.8 MTP-off); MTP4 re-enabled by default on 35B-A3B)
   - `#51812` Qwen GDN gate/spec-token alignment — **resolved**: merged
     upstream 2026-08-11 (`5af7c8d`), present in v0.28.0rc2; local patch
     dropped 2026-08-21

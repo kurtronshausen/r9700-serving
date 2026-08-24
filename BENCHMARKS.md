@@ -38,8 +38,8 @@ concurrency degrades sharply (see the c1-vs-c2 head-to-head in
 | [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_bench.md) | Qwen3.8-27B d0, pre-patch fp8-KV baseline |
 | [`benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md`](benchmarks/08_18_qwen3.8-27b_fp8kv_mtp3_depth.md) | Qwen3.8-27B depth sweep, pre-patch |
 | [`benchmarks/08_20_qwen3.8-27b_v223_template_stability.md`](benchmarks/08_20_qwen3.8-27b_v223_template_stability.md) | v22.3 chat-template stability run (multi-turn, tools, load 40/40) |
-| [`benchmarks/08_12_qwen3.6-27b_bf16_mtp4_bench.md`](benchmarks/08_12_qwen3.6-27b_bf16_mtp4_bench.md) | Qwen3.6-27B d0 (latest for that profile: bf16 KV, MTP4) |
-| [`benchmarks/08_12_qwen3.6-35b-a3b_bf16_mtpoff_bench.md`](benchmarks/08_12_qwen3.6-35b-a3b_bf16_mtpoff_bench.md) | 35B-A3B d0 (latest for that profile: bf16 KV, MTP off, tuned MoE) |
+| [`benchmarks/2026-08-24_qwen3.6-27b_bf16_mtp4_bench.md`](benchmarks/2026-08-24_qwen3.6-27b_bf16_mtp4_bench.md) | Qwen3.6-27B d0 on the current v0.28.0rc2 build (bf16 KV, MTP4) |
+| [`benchmarks/2026-08-24_qwen3.6-35b-a3b_bf16_mtp4_bench.md`](benchmarks/2026-08-24_qwen3.6-35b-a3b_bf16_mtp4_bench.md) | 35B-A3B d0 + **MTP4 re-test** on v0.28.0rc2 (clean; ~2x decode) |
 | [`benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md`](benchmarks/08_11_qwen3.6-35b-a3b_BF16+MoeTuned+MtPOff_128k_depth.md) | 35B-A3B depth sweep to 128K (MTP off, tuned MoE) |
 | [`benchmarks/STABILITY_TESTS.md`](benchmarks/STABILITY_TESTS.md) | smoke/stress/long-context coherence test scripts + baselines |
 | [`benchmarks/prefix_cache_probe.py`](benchmarks/prefix_cache_probe.py) | prefix-cache hit-rate probe (used by the AGENTS.md update workflow) |

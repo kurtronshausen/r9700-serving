@@ -154,7 +154,7 @@ restart anyway).
   `#52793` note in AGENTS.md and
   [`benchmarks/2026-08-22_kv_calibration_quality_ab.md`](benchmarks/2026-08-22_kv_calibration_quality_ab.md).
 - **`--attention-backend ROCM_AITER_UNIFIED_ATTN`** + `--speculative-config`
-  (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, disabled on 35B-A3B). MTP3 is
+  (MTP4 on Qwen3.6-27B, **MTP3** on Qwen3.8-27B, **MTP4 on 35B-A3B**). MTP3 is
   the Qwen3.8-27B default: DFlash2's decode win is short-context only (it
   decays hard with depth) and was rejected after a 2026-08-22 depth A/B — see
   [`archive/DEADENDS.md`](archive/DEADENDS.md).
@@ -220,8 +220,10 @@ Key tuning decisions:
   acceptance, ~doubles decode). Qwen3.8-27B peaks at **MTP3** (its MTP head
   accepts drafts poorly past position 3, so more drafts waste compute —
   bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4 49.2, no-MTP 32.0
-  tg32). MTP is **disabled on 35B-A3B** (pending a re-test after the upstream
-  #47087 fix — see [`archive/DEADENDS.md`](archive/DEADENDS.md)).
+  tg32). **MTP4 is now enabled on 35B-A3B** (2026-08-24): the #47087 MoE
+  token-loop bug (fixed upstream by #51113 in v0.27.1) was re-tested clean on
+  the v0.28.0rc2 build and delivers a ~2x decode win (tg32 194.9 vs 87.8 MTP-off);
+  the old "disabled" state is documented in [`archive/DEADENDS.md`](archive/DEADENDS.md).
 - **bf16 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=bfloat16`): higher
   KV fidelity than fp8. It uses more K/V bytes than fp8, so fp8 (with the
   calibrated-copy scale fix, halving KV memory) remains the option when context
@@ -267,15 +269,16 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
 Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
-KV**, 2026-08-22). The other rows are the latest available measurements for
-those profiles (2026-08-12, pre-patch build). Full methodology, per-run files,
-and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
+KV**, 2026-08-22). The Qwen3.6 rows are the latest measurements on the current
+v0.28.0rc2 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
+token-loop fix was re-validated clean — see below). Full methodology, per-run
+files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
 | Qwen3.8-27B-FP8 (default, 2026-08-22) | **MTP3** | bf16 |    2628 |   ~57 |    ~65 |
-| Qwen3.6-27B-FP8 (2026-08-12)²         | MTP4 | bf16 |   ~2500 |   **90.8** |    ~69 |
-| Qwen3.6-35B-A3B-FP8 (2026-08-12)      | off  | bf16 |   ~8510 |   **91.0** |   **91.3** |
+| Qwen3.6-27B-FP8 (2026-08-24)²         | MTP4 | bf16 |   ~1730 |   **80.5** |    ~69 |
+| Qwen3.6-35B-A3B-FP8 (2026-08-24)      | **MTP4** | bf16 |   ~5700 |   **194.9** |   **161.3** |
 
 ### Depth sweep (Qwen3.8-27B-FP8, 2026-08-22, current default: bf16 KV)
 
