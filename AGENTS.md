@@ -229,7 +229,33 @@ touches one of:
     (main-only, Kimi-K3/FlashKDA-specific TTFT win, not a fix for the 0%-hit
     geometry — not worth cherry-picking). **When a real fix merges**: prefer
     the version bump; carry a local patch only if no available release
-    contains it.
+    contains it. 2026-08-24 data points (independent 27B-scale repro on sm80,
+    Qwen3.8-27B):
+    a cache miss needs ~3 sightings, not 2 (Marconi only checkpoints after a
+    prefix is known-common), and turn-2 at 40K was *slower than cold*
+    (insertion/eviction churn in the block-aligned chunk-split path);
+    `--prefix-match-unit 400` (in rc2) does not fix the turn-2 miss but halves
+    eventual-hit TTFT. Related trigger `#52897` (0 hits with
+    `--scheduling-policy priority`) is N/A here — we don't use priority.
+  - `#53504` (2026-08-24) with MTP, the **first** repeat of an identical
+    prompt misses the prefix cache entirely on Qwen3.8-27B hybrid GDN align —
+    this stack's exact geometry (TP2, 3 Mamba groups + 1 attn, 256K); the
+    second repeat hits. Cause: the EAGLE-adjusted reusable boundary is not a
+    boundary the default *sparse* Mamba retention keeps — a side effect of
+    `#52216`, which on main promotes `prefix_cache_retention_interval` to a
+    CLI arg and flips the default from `None` (dense, our rc2 behavior) to
+    `0` (semantic checkpoints only). Workaround:
+    `--prefix-cache-retention-interval <block_size>`. Validate with the
+    prefix-cache probe on any v0.29/main bump.
+  - `#53041` RFC: tiered SWA/Mamba checkpointing (HBM tail + periodic store)
+    + recompute backfill for divergent hybrid prefix hits (same family as
+    `#52959`/`#52789`; monitor)
+  - `#53488` `prompt_logprobs` silently corrupted under MTP + chunked prefill
+    (Qwen3.5-family, two builds) — we don't request prompt_logprobs; monitor
+  - Main-only fixes to ride along on the next bump (checked 2026-08-24):
+    `#50729` Mamba state-copy overlap race in `vllm/v1/worker/mamba_utils.py`
+    (same-block conv/SSM shift copies were memmove-unsafe), `#53077` GDN
+    metadata reset of the spec-decode count on an empty draft schedule
   - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
     prefix hit (832 tokens here on the bf16-KV default; was 1600 on fp8),
     bounding the prefix-cache win for MTP even after `#45238` is fixed. Monitor
@@ -248,7 +274,16 @@ Issues known **not** to apply (checked; re-check only if the stack changes):
 NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
 MTP), non-Qwen models (#52833/#48568 GLM, #51530 DeepSeek), or paths not
 reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
-#51766/#40017, GPTQ #51971, gfx950 MLA #52312). #52688/#53397 (multi-layer MTP
+#51766/#40017/#53505/#53514, GPTQ #51971, gfx950 MLA #52312). #52897
+(align-mode 0 hits with `--scheduling-policy priority` — variant of #45238;
+we don't use priority). #52539/#53462 (Qwen GDN fused-MTP decode kernel
+head-ratio support + SM110a crash — the kernel only builds for CUDA >= 13.0
+sm80-120, absent from ROCm builds; our v/k ratio 48/16=3 is now in the
+supported set but N/A on gfx1201). #50264 (RDNA hybrid-Mamba decode collapse
+via Triton paged-attention fallback — head_dim 256/block_size != 16 misses
+the custom-paged gate; we run AITER unified attention and never reach that
+path; the #45916 fix was verified on gfx1201 but doesn't apply here).
+#52688/#53397 (multi-layer MTP
 spec_step_idx — all K draft steps re-execute layers[0]; both 27B models have
 `mtp_num_hidden_layers=1`, so layer-0-only is correct and N/A). #53136 (ROCm
 all-reduce 8–16 MiB dead zone → RCCL generic-kernel launch fault; requires
