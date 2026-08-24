@@ -269,14 +269,14 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
 the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
 Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
-KV**, 2026-08-22). The Qwen3.6 rows are the latest measurements on the current
+KV**, 2026-08-24). The Qwen3.6 rows are the latest measurements on the current
 v0.28.0rc2 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
 token-loop fix was re-validated clean — see below). Full methodology, per-run
 files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
-| Qwen3.8-27B-FP8 (default, 2026-08-22) | **MTP3** | bf16 |    2628 |   ~57 |    ~65 |
+| Qwen3.8-27B-FP8 (default, 2026-08-24) | **MTP3** | bf16 |  ~1590 |   ~53 |    ~60 |
 | Qwen3.6-27B-FP8 (2026-08-24)²         | MTP4 | bf16 |   ~1730 |   **80.5** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-24)      | **MTP4** | bf16 |   ~5700 |   **194.9** |   **161.3** |
 

@@ -23,6 +23,7 @@ concurrency degrades sharply (see the c1-vs-c2 head-to-head in
 
 | file | contents |
 |:-----|:---------|
+| [`benchmarks/2026-08-24_qwen3.8-27b_bf16_mtp3_bench.md`](benchmarks/2026-08-24_qwen3.8-27b_bf16_mtp3_bench.md) | Qwen3.8-27B d0 re-bench on the current build (bf16 KV, MTP3) |
 | [`benchmarks/2026-08-23_qwen3.8-27b_depth_full_bf16.md`](benchmarks/2026-08-23_qwen3.8-27b_depth_full_bf16.md) | Qwen3.8-27B full depth sweep, bf16 KV default (current stack) |
 | [`benchmarks/2026-08-23_qwen3.8-27b_depth_conc_bf16.md`](benchmarks/2026-08-23_qwen3.8-27b_depth_conc_bf16.md) | Qwen3.8-27B depth + concurrency sweep, bf16 KV default |
 | [`benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md`](benchmarks/2026-08-22_qwen3.8-27b_bf16kv_depth_mtp3.md) | Qwen3.8-27B depth sweep after the bf16-KV default switch |
