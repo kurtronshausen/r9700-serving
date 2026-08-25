@@ -99,12 +99,12 @@ Runtime environment is split across files:
 ### Chat template
 
 All profiles mount and use [froggeric's Qwen-Fixed-Chat-Templates]
-(`chat-templates/qwen.jinja`, pinned to **v22.3** — `qwen3.8-froggeric-v22.3`,
+(`chat-templates/qwen.jinja`, pinned to **v22.4** — `qwen3.8-froggeric-v22.4`,
 fetched from the repo's `main`). It is applied to every model via `--chat-template` in `compose.yaml`,
 overriding each model's bundled template. It fixes rendering bugs, KV-cache
 invalidation, and token waste in the official Qwen templates, and adds
 tool-error retry warnings plus `tool_call_format` / `reasoning_effort` kwargs.
-Since **v22.3**, history re-rendering is byte-identical to generated tokens on
+Since **v22.4**, history re-rendering is byte-identical to generated tokens on
 thinking-off turns, which keeps `--enable-prefix-caching` hits intact across
 multi-turn conversations (this stack runs thinking-off). Thinking is
 partitioned into the `reasoning` field and the answer into `content`;

@@ -156,6 +156,11 @@ gh search issues -R vllm-project/vllm --state open --limit 25 "MTP" \
 gh search issues -R vllm-project/vllm --state open --limit 25 "hybrid" --json number,title
 gh search issues -R vllm-project/vllm --state open --limit 25 "ROCm" --json number,title
 gh search issues -R vllm-project/vllm --state open --limit 25 "mamba" --json number,title
+# RNDA4 (and correctly-spelled RDNA4) + gfx1201 — surfaces Radeon/RDNA-family
+# issues that the ROCm/hybrid/MTP themes above may miss:
+gh search issues -R vllm-project/vllm --state open --limit 25 "RNDA4" --json number,title
+gh search issues -R vllm-project/vllm --state open --limit 25 "RDNA4" --json number,title
+gh search issues -R vllm-project/vllm --state open --limit 25 "gfx1201" --json number,title
 ```
 
 Apply the relevance filters from step 3 when triaging results: track **only**
@@ -182,7 +187,7 @@ touches one of:
   hybrid Mamba/GDN models, MTP/speculative decoding, prefix caching
   (align mamba cache mode), fp8 KV, or `ROCM_AITER_UNIFIED_ATTN` is in scope.
 - **Chat template**: froggeric `chat-templates/qwen.jinja` (pinned, e.g.
-  v22.3). A newer version matters when it changes prompt rendering in ways
+  v22.4). A newer version matters when it changes prompt rendering in ways
   this stack hits: history re-render must stay byte-identical to generated
   tokens (KV-cache/prefix-cache invariance) for thinking-off multi-turn,
   tool-argument formatting for the `qwen3_coder` XML parser, or reasoning/
