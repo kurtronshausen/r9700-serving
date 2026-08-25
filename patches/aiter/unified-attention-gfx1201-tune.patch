@@ -1,0 +1,30 @@
+diff --git a/aiter/ops/triton/attention/unified_attention.py b/aiter/ops/triton/attention/unified_attention.py
+index 235e9de..e8d0bc5 100644
+--- a/aiter/ops/triton/attention/unified_attention.py
++++ b/aiter/ops/triton/attention/unified_attention.py
+@@ -99,6 +99,11 @@ def select_2d_config(
+             if max_seqlen_q >= 256:
+                 BLOCK_M = 64 if arch.is_rdna else 128
+                 num_stages_2d, num_warps = 1, 4
++                # gfx1201 (RDNA4): 8 warps/workgroup beats the default 4 by
++                # ~7% on 2048-token prefill (and long-context chunked prefill)
++                # with bitwise-identical output (measured 2026-08-25, 2x R9700).
++                if arch.name == "gfx1201":
++                    num_warps = 8
+             else:
+                 num_stages_2d, num_warps = 1, 2
+ 
+@@ -278,6 +283,13 @@ def select_3d_config(
+     if DEVICE_ARCH == "gfx1151":
+         attn_warps = 8
+ 
++    # gfx1201 (RDNA4) long-context decode (3D kernel) is latency-bound at bs=1
++    # with the default 2 warps: 4 warps/workgroup gives ~1.4x decode at 16k-128k
++    # context with bitwise-identical output (measured 2026-08-25, 2x R9700).
++    # waves_per_eu is left at its default (2); higher values did not help.
++    if DEVICE_ARCH == "gfx1201":
++        attn_warps = 4
++
+     attn_config = {
+         "TILE_SIZE": TILE_SIZE,
+         "NUM_SEGMENTS_PER_SEQ": num_segments,

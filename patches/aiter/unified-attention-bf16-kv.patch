@@ -1,28 +1,31 @@
-Index: aiter/ops/triton/attention/unified_attention.py
+diff --git a/aiter/ops/triton/attention/unified_attention.py b/aiter/ops/triton/attention/unified_attention.py
+index 235e9de..7dfa7c6 100644
 --- a/aiter/ops/triton/attention/unified_attention.py
 +++ b/aiter/ops/triton/attention/unified_attention.py
-@@ -106,6 +106,12 @@
+@@ -106,6 +106,13 @@ def select_2d_config(
      else:
          # to not have masking when loading KV
          TILE_SIZE = min(64, triton.next_power_of_2(block_size))
-+        # bf16 KV tiles are 2x the bytes of fp8: cap TILE_SIZE so the staged
-+        # K/V tiles fit within the 64 KiB workgroup shared-memory limit on
-+        # RDNA (gfx1201 would otherwise fail at warmup with
-+        # "out of resource: shared memory, Required: 65792, Hardware limit: 65536").
-+        if kv_cache_dtype == torch.bfloat16:
++        # bf16 KV tiles are 2x the bytes of fp8. On RDNA (64 KiB workgroup
++        # LDS limit) a 64-wide tile with head_size 256 stages
++        # 2 * 64 * 256 * 2 + scratch = 65792 B > 65536 B, which Triton rejects
++        # at launch ("out of resource: shared memory"). Cap the tile so the
++        # staged K/V tiles fit. See ROCm/aiter#4329 / vllm-project/vllm#48723.
++        if arch.is_rdna and kv_cache_dtype == torch.bfloat16:
 +            TILE_SIZE = min(32, TILE_SIZE)
          if arch.is_rdna:
              num_stages_2d, num_warps = 1, 4
          else:
-@@ -210,6 +216,14 @@
+@@ -217,6 +224,15 @@ def select_3d_config(
  
          TILE_SIZE = min(64, triton.next_power_of_2(block_size))
  
 +        # bf16 KV tiles are 2x the bytes of fp8: keep the staged K/V tiles and
 +        # pipeline depth within the 64 KiB workgroup shared-memory limit on
 +        # RDNA (gfx1201 would otherwise raise
-+        # "out of resource: shared memory, Hardware limit: 65536").
-+        if kv_cache_dtype == torch.bfloat16:
++        # "out of resource: shared memory, Required: 65792, Hardware limit: 65536").
++        # See ROCm/aiter#4329 / vllm-project/vllm#48723.
++        if arch.is_rdna and kv_cache_dtype == torch.bfloat16:
 +            TILE_SIZE = min(32, TILE_SIZE)
 +            attn_stages = 1
 +

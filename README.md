@@ -189,6 +189,39 @@ loop). Re-verify each patch applies cleanly on the new ref when bumping
   sharing the prefix (#43559, #50188). The fix lowers the cache-hit search
   ceiling by one page.
 
+### AITER source-build patches (applied at image build time)
+
+`Dockerfile.fullbuild` applies `patches/aiter/*.patch` to the pinned
+`AITER_REF` (v0.1.20) before building the wheel. Together they make aiter's
+unified attention work and run well on RDNA4 (`gfx1201`):
+
+- **`unified-attention-bf16-kv.patch`** — with bf16 KV the staged K/V tiles of
+  the 2D-decode and 3D kernels overflow RDNA's 64 KiB workgroup LDS
+  (`"out of resource: shared memory, Required: 65792, Hardware limit: 65536"`,
+  a hard startup abort). Caps `TILE_SIZE` to 32 (and drops `attn_stages` to 1
+  on 3D) when `kv_cache_dtype == bfloat16`, gated on `arch.is_rdna`. This is
+  the fix for upstream [ROCm/aiter#4329]
+  (https://github.com/ROCm/aiter/issues/4329) / [vllm#48723]
+  (https://github.com/vllm-project/vllm/issues/48723), still open upstream.
+- **`unified-attention-gfx1201-tune.patch`** — per-arch launch-config tuning
+  for gfx1201, mirroring the in-file `gfx1151` precedent. 3D long-context
+  decode (the kernel behind decode at depth): `attn_warps` 2 → 4 makes the
+  attention kernel **~1.4–1.9× faster** at 16k–128k context, bitwise-identical,
+  for both bs=1 and the MTP batch-decode shape (q_len>1). 2D large-prefill:
+  `num_warps` 4 → 8 gives ~7% on the attention prefill kernel. These are
+  attention-kernel wins; end-to-end decode is dominated by the 48 GDN layers +
+  MTP + TP, so the system-level effect is within noise (see the tuning doc). See
+  [`benchmarks/2026-08-25_gfx1201_ua_tuning.md`](benchmarks/2026-08-25_gfx1201_ua_tuning.md)
+  for the full sweep.
+- **`allowed-archs-gfx1201.patch`** — accept gfx1201 (and the rest of the RDNA
+  family) in `csrc/cpp_itfs/utils.py` `allowed_archs` so a
+  `GPU_ARCHS=gfx1201` build-time prebuild path doesn't hard-assert (matches the
+  runtime JIT list in `aiter/jit/core.py`; inert here since this repo runs
+  `PREBUILD_KERNELS=0`).
+
+Re-verify each patch applies cleanly on the new ref when bumping `AITER_REF`
+(they are version-locked to v0.1.20).
+
 ### Runtime env knobs
 
 Non-standard environment set across `compose.yaml`, `Dockerfile.fullbuild`,
@@ -214,7 +247,10 @@ and `env/2xr9700.vllm.common` (loaded via `env_file`):
 
 The `VLLM_ROCM_USE_AITER_*` flags in `env/aiter-unified-attention.env` enable
 only AITER's unified attention; MoE/linear/RMSNorm stay on stock vLLM kernels
-(AITER's MoE/FP8 backends don't support `gfx1201` yet).
+(AITER's MoE/FP8 backends don't support `gfx1201` yet). The attention backend
+is configured for gfx1201 by the aiter patches above (bf16-KV LDS caps +
+per-arch tuning); `tools/tune_ua_config.py` re-runs the config sweep to
+re-validate or retune after an `AITER_REF` bump.
 
 Key tuning decisions:
 - **MTP speculative decoding** (dense profiles): MTP4 on Qwen3.6-27B (~72%

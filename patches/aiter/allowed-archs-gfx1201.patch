@@ -1,0 +1,39 @@
+diff --git a/csrc/cpp_itfs/utils.py b/csrc/cpp_itfs/utils.py
+index 3fa8987..f14205d 100644
+--- a/csrc/cpp_itfs/utils.py
++++ b/csrc/cpp_itfs/utils.py
+@@ -144,7 +144,15 @@ def hip_flag_checker(flag_hip: str) -> bool:
+ def validate_and_update_archs():
+     archs = GPU_ARCH.split(";")
+     archs = [arch.strip().split(":")[0] for arch in archs]
+-    # List of allowed architectures
++    # List of allowed architectures.
++    # This is the build-time prebuild path (PREBUILD_KERNELS != 0), separate
++    # from the runtime JIT list in aiter/jit/core.py, which already includes
++    # every RDNA (gfx1100-1201) arch. The RDNA entries are accepted here too so
++    # a GPU_ARCHS=gfx1201 build does not hard-assert; the CK modules simply do
++    # not dispatch on RDNA (aiter's CK kernels are CDNA-only), so a prebuild on
++    # gfx1201 produces no CK kernels but still packages the Triton path that
++    # gfx1201 actually uses. This repo runs PREBUILD_KERNELS=0, so it is inert
++    # here but keeps a GPU_ARCHS=gfx1201 (R9700) source build valid.
+     allowed_archs = [
+         "native",
+         "gfx90a",
+@@ -152,7 +160,17 @@ def validate_and_update_archs():
+         "gfx941",
+         "gfx942",
+         "gfx950",
++        "gfx1100",
++        "gfx1101",
++        "gfx1102",
++        "gfx1103",
++        "gfx1150",
+         "gfx1151",
++        "gfx1152",
++        "gfx1153",
++        "gfx1200",
++        "gfx1201",
++        "gfx1250",
+     ]
+ 
+     # Validate if each element in archs is in allowed_archs

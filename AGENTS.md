@@ -324,6 +324,16 @@ explicit `--block-size`, which we never pass).
 `patches/vllm/*.patch` and `patches/aiter/*.patch` are cherry-picks/overrides
 applied at build time. Before bumping any pin:
 
+- The aiter patches (version-locked to `AITER_REF` v0.1.20) are **RDNA4-local
+  work**, not upstream cherry-picks: `unified-attention-bf16-kv.patch`
+  (bf16-KV LDS caps, the fix for upstream ROCm/aiter#4329 / vllm#48723, still
+  open), `unified-attention-gfx1201-tune.patch` (per-arch gfx1201 tuning:
+  attn_warps 4 in 3D decode ~1.4-1.9x, num_warps 8 in 2D large-prefill ~7%),
+  and `allowed-archs-gfx1201.patch` (build-path arch acceptance). When a newer
+  `AITER_REF` merges #4329, the bf16-KV cap should be **dropped** (upstreamed)
+  but re-verify the tuning still wins — re-run `tools/tune_ua_config.py` (with
+  `just down` first) and re-check the LDS guard. See
+  `benchmarks/2026-08-25_gfx1201_ua_tuning.md`.
 - Check whether a newer `VLLM_REF` **already contains** a carried patch (the
   fix landed upstream). If so, the patch should be **dropped**, not kept.
   Verify: `gh pr view <pr> --repo vllm-project/vllm` and check the PR's merged
