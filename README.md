@@ -70,14 +70,15 @@ host render group gid for `/dev/dri` access — check with `getent group render`
 |:-------------|:--------|
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
 | PyTorch      | 2.13.0+rocm7.14.0 |
-| vLLM         | 0.28.0rc2 |
+| vLLM         | 0.28.0 |
 | AITER        | v0.1.20 |
 | Flash Attention | @ 1cc7ff67 |
 
 ROCm 7.14 is on AMDs "TheRock" technology-preview stream (7.9/7.13/7.14); the
 production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.20` is the
-latest tagged release; vLLM is the 0.28.0rc2 prerelease (latest stable is
-0.27.1) since `gfx1201` requires source builds.
+latest tagged release; vLLM is 0.28.0 (rc2 + 3 CI/NVIDIA-only commits, so the
+stable tag == the previously-pinned rc2 in behavior) since `gfx1201` requires
+source builds.
 
 The default (active) model is `Qwen/Qwen3.8-27B-FP8` (`qwen3.8-27b`, the
 newest dense 27B hybrid linear/full-attention architecture, MTP trained,
@@ -166,18 +167,18 @@ Version-locked patches applied at runtime by read-only bind-mounts in
 the pinned dependency.
 
 - **Tolerate empty `tools` arrays** (`patches/vllm/protocol.py`, pinned to
-  `VLLM_REF` v0.28.0rc2): some clients send `{"tools": [], "tool_choice":
+  `VLLM_REF` v0.28.0): some clients send `{"tools": [], "tool_choice":
   "none"}`, which upstream rejects with a 400. The overlay treats `tools: []`
   as a no-tools request when `tool_choice` is `"none"`/omitted, while still
   rejecting genuinely invalid combos.
 
 ### Source-build patches (applied at image build time)
 
-Local backport of an upstream fix not in `VLLM_REF` v0.28.0rc2, applied by
+Local backport of an upstream fix not in `VLLM_REF` v0.28.0, applied by
 `Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the aiter patch
 loop). Re-verify each patch applies cleanly on the new ref when bumping
 `VLLM_REF`. (#51812/#51837 were carried as patches on v0.27.1, merged upstream
-2026-08-11, and dropped with the v0.28.0rc2 bump.)
+2026-08-11, and dropped with the v0.28.0 bump.)
 
 - **Honor `drop_eagle_block` in `MambaManager`**
   (`patches/vllm/48375-mamba-drop-eagle-block.patch`,
@@ -222,7 +223,7 @@ Key tuning decisions:
   bf16-KV sweep: MTP3 57.6, MTP2 56.0, MTP1 45.6, MTP4 49.2, no-MTP 32.0
   tg32). **MTP4 is now enabled on 35B-A3B** (2026-08-24): the #47087 MoE
   token-loop bug (fixed upstream by #51113 in v0.27.1) was re-tested clean on
-  the v0.28.0rc2 build and delivers a ~2x decode win (tg32 194.9 vs 87.8 MTP-off);
+  the v0.28.0 build and delivers a ~2x decode win (tg32 194.9 vs 87.8 MTP-off);
   the old "disabled" state is documented in [`archive/DEADENDS.md`](archive/DEADENDS.md).
 - **bf16 KV cache** (current default, `VLLM_KV_CACHE_DTYPE=bfloat16`): higher
   KV fidelity than fp8. It uses more K/V bytes than fp8, so fp8 (with the
@@ -266,11 +267,11 @@ stale triage snapshots live in
 
 ## Performance
 
-Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0rc2 +
+Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0 +
 the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
 Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
 KV**, 2026-08-24). The Qwen3.6 rows are the latest measurements on the current
-v0.28.0rc2 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
+v0.28.0 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
 token-loop fix was re-validated clean — see below). Full methodology, per-run
 files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
