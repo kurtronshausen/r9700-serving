@@ -21,6 +21,10 @@ Run inside the vllm container with the server stopped (clean timings):
     run -T --rm --no-deps --entrypoint python vllm \
     /home/philip/r9700-serving/tools/tune_ua_config.py \
     --out /workspace/ua_sweep.json
+
+`--qheads/--kvheads` override the head count, e.g. `--qheads 12 --kvheads 2`
+times the per-GPU (TP=2) attention slice for a decode-step fraction estimate
+(see benchmarks/2026-08-25_gfx1201_ua_tuning.md).
 """
 
 import argparse
@@ -57,6 +61,7 @@ SCENARIOS = {
     "d128k": (1, 1, 131072),
     "d64k_q4": (1, 4, 65536),     # MTP-style batch decode (4 query tokens)
     "d128k_q4": (1, 4, 131072),
+    "d256k_q4": (1, 4, 262144),
     "p2k": (1, 2048, 2048),        # 2D prefill (num_2d_prgms > target)
     "p2k_c64k": (1, 2048, 65536),  # chunked-extend with long context
 }
@@ -199,6 +204,7 @@ def is_lds_error(ex):
 
 
 def main():
+    global NUM_Q_HEADS, NUM_KV_HEADS, NUM_QUERY_PER_KV
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/workspace/ua_sweep.json")
     ap.add_argument("--scenarios", default=",".join(SCENARIOS))
@@ -210,7 +216,17 @@ def main():
                     help="comma list of attn num_warps to sweep (3D)")
     ap.add_argument("--3d-waves", default="6,8",
                     help="comma list of waves_per_eu to sweep (3D)")
+    ap.add_argument("--qheads", type=int, default=None,
+                    help="override num query heads (e.g. 12 for per-GPU TP=2)")
+    ap.add_argument("--kvheads", type=int, default=None,
+                    help="override num kv heads")
     args = ap.parse_args()
+
+    if args.qheads is not None:
+        NUM_Q_HEADS = args.qheads
+    if args.kvheads is not None:
+        NUM_KV_HEADS = args.kvheads
+    NUM_QUERY_PER_KV = NUM_Q_HEADS // NUM_KV_HEADS
 
     free_gb = torch.cuda.mem_get_info()[0] / 2**30
     if free_gb < 3.0:

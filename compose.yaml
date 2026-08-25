@@ -124,3 +124,4 @@ services:
       -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN
       ${VLLM_SPEC_DECODE:+--speculative-config '${VLLM_SPEC_DECODE}'}
+      ${VLLM_PROFILER_ARGS:-}
