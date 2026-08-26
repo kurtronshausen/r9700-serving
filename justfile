@@ -185,10 +185,11 @@ tune: check ensure-cache-dirs
         fi
     fi
     printf 'Tuning on GPU {{tune_gpu}} (dense shapes: %s) ...\n' "$dense_shapes"
-    DENSE_SHAPES="$dense_shapes" REPO_DIR="$PWD" \
     {{compose}} run -T --rm --no-deps \
+        -e DENSE_SHAPES="$dense_shapes" \
+        -e REPO_DIR=/app \
         -e HIP_VISIBLE_DEVICES="{{tune_gpu}}" \
-        --entrypoint python vllm "$PWD/tools/run_tune.py"
+        --entrypoint python vllm /app/tools/run_tune.py
     printf 'Tune complete. Run `just up` to pick up the new configs, then `just bench`.\n'
 
 # Ensure the selected profile's calibrated KV-scale model copy exists. Profiles
