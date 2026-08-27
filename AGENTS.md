@@ -11,44 +11,53 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 
 | recipe | purpose |
 |:-------|:--------|
-| `just check` | validate the compose config for both model profiles (main + vision) |
-| `just build` | build the Docker image |
-| `just rebuild` | force-rebuild (no cache) |
-| `just up` | start the vLLM servers (runs `check`, `ensure-cache-dirs`, `prewarm`, starts both containers, waits for main readiness, runs warmup) |
+| `just check` | validate the compose config for both model profiles (main + flash-next) |
+| `just build` | build the main Docker image (`vllm` service only) |
+| `just build-flashnext` | build the Qwen3.8-Flash-Next image (Dockerfile.flashnext, `vllm-qwen-flashnext` service) |
+| `just rebuild` / `just rebuild-flashnext` | force-rebuild (no cache), main / flashnext image |
+| `just up` | start the main `vllm` service (runs `check`, `ensure-cache-dirs`, `prewarm`, waits for readiness, runs warmup) |
+| `just up-flashnext` | start the `vllm-qwen-flashnext` service (needs `build-flashnext` first) |
 | `just prewarm` | build shared aiter JIT kernels in one throwaway container (runs automatically before every `up`) |
 | `just bench` | benchmark the selected model via `llama-benchy` (pp2048, tg32+128) |
 | `just tune` | tune Triton GEMM kernel configs for the selected profile (dense W8A8 block-FP8 + fused MoE) in a throwaway container on one GPU; independent of the running `vllm` service, results picked up on next `just up` |
-| `just logs [service]` | follow container logs (all services, or one: `just logs vllm-vision`) |
+| `just logs [service]` | follow container logs (all services, or one: `just logs vllm-qwen-flashnext`) |
 | `just down` | stop and remove the containers |
 | `just exec <cmd>` | run a command inside the running container (e.g. `just exec bash`) |
 | `just compose <args>` | raw compose passthrough (e.g. `just compose up -d vllm`, `just compose ps`) |
 | `just ensure-cache-dirs` | pre-create host cache dirs owned by the current user |
-| `just clear-vllm-caches` | wipe compile caches (triton, torchinductor, aiter, etc., incl. the `*_vision` dirs) |
+| `just clear-vllm-caches` | wipe compile caches (triton, torchinductor, aiter, etc., incl. the `*_flashnext` dirs) |
 
 There is no `command:` in `compose.yaml`: `entrypoint.sh` (the image
 ENTRYPOINT) assembles the `vllm serve` arguments from each service's own
 environment at startup — the `env/<profile>.env` stack the recipes pass to
 compose via `--env-file` (alongside `.env` for the build pins). This is what
-lets `vllm` and `vllm-vision` run different profiles from one compose file.
-Bare `docker compose up` fails with a required-variable error
-(`MODEL_PROFILE`/`VISION_MODEL_PROFILE` unset) by design — always go through
-`just`. `.env` is untracked; create it with `cp .env.example .env`.
+lets `vllm` and `vllm-qwen-flashnext` run different profiles from one compose
+file. Bare `docker compose up` fails with a required-variable error
+(`MODEL_PROFILE` unset) by design — always go through `just`. `.env` is
+untracked; create it with `cp .env.example .env`.
 
-To switch models, set `MODEL_PROFILE` / `VISION_MODEL_PROFILE` or use `--set`:
+To switch the MAIN model, set `MODEL_PROFILE` or use `--set`:
 
 ```
 MODEL_PROFILE=qwen3.6-27b just up
 just --set model qwen3.6-27b up
-just --set vision_model qwen2.5-vl-72b-instruct up
 ```
 
-`vllm-vision` is a second, concurrent container (same image/entrypoint) on
-host port `${VISION_PORT:-8001}` (main: `${PORT:-8000}`), fed by
-`env/${VISION_MODEL_PROFILE}.env`, with its own
-`~/.cache/{triton,torchinductor,tilelang}_vision` dirs. The aiter JIT dir is
-shared between the two containers (`just prewarm` builds it once). Both
-containers see all four GPUs; assign non-overlapping GPU sets at runtime when
-running them together (see README "Multiple containers").
+`vllm-qwen-flashnext` is a second, concurrent container (same entrypoint) on
+host port `${FLASHNEXT_PORT:-8001}` (main: `${PORT:-8000}`), fed by
+`env/qwen3.8-flash-next.env`, with its own
+`~/.cache/{triton,torchinductor,tilelang}_flashnext` dirs. It is built from a
+SEPARATE image: `Dockerfile.flashnext` is byte-identical to
+`Dockerfile.fullbuild` except the vLLM stage applies
+`patches/vllm-flashnext/` (newer vLLM head carrying qwen4_exp + the local PLE
+CPU-offload patch) at `FLASHNEXT_VLLM_REF`/`FLASHNEXT_VLLM_VERSION`. The
+separate pins mean the two images build/cache independently — switching back
+to the qwen3.8-27b stack never rebuilds the flashnext image. `just up` starts
+only `vllm`; `just up-flashnext` starts the flashnext service (and its PLE
+n-gram table needs ~110 GiB of free host RAM, `VLLM_PLE_CPU_OFFLOAD=1`). The
+aiter JIT dir is shared between the two containers (`just prewarm` builds it
+once). Both containers see all four GPUs; assign non-overlapping GPU sets at
+runtime when running them together (see README "Multiple containers").
 
 ## Build Caveats
 
@@ -75,11 +84,12 @@ running them together (see README "Multiple containers").
   the host user, so `just ensure-cache-dirs` only pre-creates `~/.cache` and
   `~/.vllm-workspace`.
 - Cache dirs managed by `just clear-vllm-caches`: `~/.cache/{vllm,triton,
-  torchinductor,aiter,comgr,tvm-ffi,tilelang}` plus the vllm-vision
-  containers' `~/.cache/{triton,torchinductor,tilelang}_vision` (huggingface
+  torchinductor,aiter,comgr,tvm-ffi,tilelang}` plus the vllm-qwen-flashnext
+  container's `~/.cache/{triton,torchinductor,tilelang}_flashnext` (huggingface
   kept: model weights).
-- Always clear caches after updating `VLLM_REF`/`VLLM_VERSION` or changing
-  `AITER_REF` to avoid stale kernel artifacts causing runtime errors.
+- Always clear caches after updating `VLLM_REF`/`VLLM_VERSION`
+  (or `FLASHNEXT_VLLM_REF`/`FLASHNEXT_VLLM_VERSION`) or changing `AITER_REF`
+  to avoid stale kernel artifacts causing runtime errors.
 
 ### Non-root aiter JIT (required)
 - aiter's JIT build falls back to `~/.aiter/jit` when site-packages isn't
@@ -96,14 +106,18 @@ running them together (see README "Multiple containers").
   dying at exit leaves a stale aiter baton lock that deadlocks startup.
 - A stale baton lock (`~/.cache/aiter/jit/build/lock_*` referencing a dead
   PID/container) is not auto-cleared by aiter; `just prewarm` removes it first.
-- The `vllm-vision` container shares this aiter JIT dir with `vllm`
+- The `vllm-qwen-flashnext` container shares this aiter JIT dir with `vllm`
   (deliberate: concurrent *readers* of built kernels are safe; only concurrent
   *builds* race, and prewarm has already done the building). The other
-  compile caches are per-container (`*_vision` dirs) for the same reason.
+  compile caches are per-container (`*_flashnext` dirs) for the same reason.
 
 ### Version Pins
 - All build pins live in `.env` (untracked) and `.env.example` (tracked template).
 - When upgrading vLLM, update both `VLLM_REF` and `VLLM_VERSION` in **both files**.
+- The flashnext image has INDEPENDENT pins: `FLASHNEXT_VLLM_REF`/
+  `FLASHNEXT_VLLM_VERSION` (currently a vLLM main-head commit carrying
+  qwen4_exp; see `patches/vllm-flashnext/` version-lock comments). Bump them
+  only with `just build-flashnext`; the main image is unaffected.
 - Key dependencies to cross-check against vLLM release notes:
   - `AITER_REF` — ROCm kernels library
   - `FLASH_ATTN_REF` — flash attention (commit pin)
@@ -313,19 +327,25 @@ explicit `--block-size`, which we never pass).
 
 ### 4. Local patches vs upstream
 
-`patches/vllm/*.patch` and `patches/aiter/*.patch` are cherry-picks/overrides
-applied at build time. Before bumping any pin:
+`patches/vllm/*.patch` (main image), `patches/vllm-flashnext/*.patch`
+(flashnext image) and `patches/aiter/*.patch` are cherry-picks/overrides
+applied at build time by `Dockerfile.fullbuild` / `Dockerfile.flashnext`
+respectively; `patches/*/protocol.py` files are compose volume-mount
+overlays, version-locked per image. Before bumping any pin:
 
-- Check whether a newer `VLLM_REF` **already contains** a carried patch (the
-  fix landed upstream). If so, the patch should be **dropped**, not kept.
-  Verify: `gh pr view <pr> --repo vllm-project/vllm` and check the PR's merged
-  status + which release tag includes it (compare tag commits via
-  `git ls-remote --tags https://github.com/vllm-project/vllm.git`).
+- Check whether a newer `VLLM_REF`/`FLASHNEXT_VLLM_REF` **already contains**
+  a carried patch (the fix landed upstream). If so, the patch should be
+  **dropped**, not kept. Verify: `gh pr view <pr> --repo vllm-project/vllm`
+  and check the PR's merged status + which release tag includes it (compare
+  tag commits via `git ls-remote --tags https://github.com/vllm-project/vllm.git`).
 - After any pin change, verify each patch still applies cleanly on the new
-  ref before building; a failed `git apply` in `Dockerfile.fullbuild` aborts
-  the build. Bump the version-lock comment in each patch header too.
-- Always `just clear-vllm-caches` after a `VLLM_REF`/`VLLM_VERSION`/`AITER_REF`
-  change, then `just rebuild` (see Rebuild Timeouts).
+  ref before building; a failed `git apply` in the Dockerfile aborts the
+  build. Bump the version-lock comment in each patch header too. If a fix is
+  needed for BOTH images, carry it in BOTH patch dirs (the dirs are NOT
+  symlinked — copy the patch and adjust the version-lock header).
+- Always `just clear-vllm-caches` after a `VLLM_REF`/`VLLM_VERSION`/
+  `FLASHNEXT_VLLM_REF`/`FLASHNEXT_VLLM_VERSION`/`AITER_REF` change, then
+  `just rebuild` / `just rebuild-flashnext` (see Rebuild Timeouts).
 
 ### 5. Recommended bump checklist
 

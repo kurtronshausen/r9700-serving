@@ -25,9 +25,9 @@ set -eu
 : "${VLLM_TOKENIZER:?set in env/<profile>.env - start the server with: just up}"
 : "${VLLM_SERVED_NAME:?set in env/<profile>.env - start the server with: just up}"
 
-# VLLM_TOOL_CHOICE is intentionally unquoted: it holds an argument string
-# (e.g. "--enable-auto-tool-choice --tool-call-parser qwen3_coder") that must
-# word-split into separate flags.
+# VLLM_TOOL_CHOICE and VLLM_EXTRA_ARGS are intentionally unquoted: they hold
+# argument strings (e.g. "--enable-expert-parallel") that must word-split
+# into separate flags.
 exec vllm serve \
     "$VLLM_MODEL" \
     --tokenizer "$VLLM_TOKENIZER" \
@@ -51,4 +51,5 @@ exec vllm serve \
     ${VLLM_QUANTIZATION:+--quantization "$VLLM_QUANTIZATION"} \
     -tp "${VLLM_TP:-2}" \
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
-    ${VLLM_SPEC_DECODE:+--speculative-config "$VLLM_SPEC_DECODE"}
+    ${VLLM_SPEC_DECODE:+--speculative-config "$VLLM_SPEC_DECODE"} \
+    ${VLLM_EXTRA_ARGS}
