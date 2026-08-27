@@ -187,10 +187,18 @@ RUN cd /src/vllm \
     && python use_existing_torch.py --prefix \
     && python -m pip install -r requirements/rocm.txt
 
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cd /src/vllm \
-    && ./tools/install_protoc.sh \
-    && bash build_rust.sh
+# As of this ref, `tools/install_protoc.sh` and `build_rust.sh` no longer
+# exist: proto generation moved to pure Rust (protox in rust/src/server/
+# build.rs — no protoc binary) and the Rust extension is compiled by
+# setuptools-rust during `setup.py bdist_wheel`. rust-toolchain.toml pins
+# channel 1.95 and Ubuntu 24.04's apt rustc is 1.75 (too old), so install
+# the pinned toolchain via rustup and put the rustup shims on PATH for the
+# wheel build below.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal \
+        --default-toolchain "$(grep '^channel' /src/vllm/rust-toolchain.toml | sed 's/.*= *\"\(.*\)\"/\1/')" \
+    && rustc --version
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \

@@ -145,6 +145,10 @@ services:
       default:
         aliases:
           - llm-flashnext-backend
+    # FLASHNEXT_PROFILE selects the flashnext model profile (default: the
+    # full W4A16 model; qwen3.8-flash-next-tiny = 119 MB Qwen4Exp smoke
+    # model that coexists with the running 27b service). Override at
+    # runtime: FLASHNEXT_PROFILE=qwen3.8-flash-next-tiny just up-flashnext
     volumes:
       - ./chat-templates/:/app/chat-templates
       - ./fused_moe_configs/:/app/fused_moe_configs
@@ -162,7 +166,7 @@ services:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
       - env/qwen3.6.env.common
-      - ./env/qwen3.8-flash-next.env
+      - ./env/${FLASHNEXT_PROFILE:-qwen3.8-flash-next}.env
     environment:
       - HOME=${HOME}
       # Shared with the `vllm` service: prewarmed once, read-only afterwards.
