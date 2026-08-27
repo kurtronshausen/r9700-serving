@@ -257,7 +257,9 @@ COPY patches/vllm-flashnext/ /patches/vllm/
 # worktree, and a silent no-op would ship an unpatched image. `set -e` so a
 # patch that fails `--check` aborts the build instead of slipping through
 # the for-loop.
-RUN set -euo pipefail \
+# No pipefail: the RUN shell is /bin/sh (dash), which lacks it. `set -eu`
+# is enough — there are no pipelines in this step.
+RUN set -eu \
     && cd /opt/venv/lib/python3.12/site-packages \
     && git init -q . \
     && for patch in /patches/vllm/*.patch; do \
