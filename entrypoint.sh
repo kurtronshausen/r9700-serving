@@ -52,4 +52,4 @@ exec vllm serve \
     -tp "${VLLM_TP:-2}" \
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
     ${VLLM_SPEC_DECODE:+--speculative-config "$VLLM_SPEC_DECODE"} \
-    ${VLLM_EXTRA_ARGS}
+    ${VLLM_EXTRA_ARGS:-}
