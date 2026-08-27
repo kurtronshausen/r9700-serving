@@ -1,4 +1,4 @@
-From e453e6cd6ca5c5bc1b490d494a3264dccda33d30 Mon Sep 17 00:00:00 2001
+From 5885ce2224a534a8ff107efa0fd8009eeaf4c2b7 Mon Sep 17 00:00:00 2001
 From: Kurt Ronshausen <kurt.ronshausen@telusagcg.com>
 Date: Thu, 27 Aug 2026 12:36:39 -0700
 Subject: [PATCH] feat(qwen4_exp): PLE n-gram table CPU offload for AMD (ROCm)
@@ -51,7 +51,7 @@ index a24debdeb..7544da92d 100755
      # interleaved flydsl kernels instead of the default a16w4 separated path.
      # This is the only flag users need: vLLM picks the kernels by passing
 diff --git a/vllm/models/qwen4_exp/amd/ple_layer.py b/vllm/models/qwen4_exp/amd/ple_layer.py
-index a1a600c9c..7e22aaff5 100644
+index a1a600c9c..cbab51602 100644
 --- a/vllm/models/qwen4_exp/amd/ple_layer.py
 +++ b/vllm/models/qwen4_exp/amd/ple_layer.py
 @@ -9,7 +9,9 @@ import torch
@@ -162,12 +162,12 @@ index a1a600c9c..7e22aaff5 100644
          )
  
 +        self.ple_offload = envs.VLLM_PLE_CPU_OFFLOAD
-+        self._ple_host_table: torch.Tensor | None = None
++        self._ple_pinned_table: torch.Tensor | None = None
 +        self._ple_gpu_freed = False
 +
 +    def _ple_host_table(self, embedding: VocabParallelEmbedding) -> torch.Tensor:
 +        """Lazily allocate this rank's pinned host copy of the ngram table."""
-+        table = self._ple_host_table
++        table = self._ple_pinned_table
 +        if table is None:
 +            # zeros (not empty): global padding-region rows must read as zero,
 +            # matching the GPU path's zero-padded VocabParallelEmbedding.
@@ -176,7 +176,7 @@ index a1a600c9c..7e22aaff5 100644
 +                dtype=embedding.weight.dtype,
 +                pin_memory=True,
 +            )
-+            self._ple_host_table = table
++            self._ple_pinned_table = table
 +        return table
 +
 +    def _ple_free_gpu_table(self) -> None:
