@@ -23,6 +23,7 @@ concurrency degrades sharply (see the c1-vs-c2 head-to-head in
 
 | file | contents |
 |:-----|:---------|
+| [`benchmarks/2026-08-27_qwen3.8-27b_depth_no_async.md`](benchmarks/2026-08-27_qwen3.8-27b_depth_no_async.md) | Qwen3.8-27B full depth sweep 0–256K (`--no-async-scheduling`, fp8 KV): decode holds 41–60 t/s all depths, pp256K 1277 t/s / 202 s |
 | [`benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md`](benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md) | `--no-async-scheduling` (MTP profiles; #51571 mitigation): decode parity, pp2048 ~3.28k, c2 coherence smoke clean |
 | [`benchmarks/2026-08-25_qwen3.8-27b_v0.28.0_bench.md`](benchmarks/2026-08-25_qwen3.8-27b_v0.28.0_bench.md) | Qwen3.8-27B d0 on the v0.28.0 bump (bf16 KV, MTP3; decode parity, pp2048 ~3.06k) |
 | [`benchmarks/2026-08-24_qwen3.8-27b_bf16_mtp3_bench.md`](benchmarks/2026-08-24_qwen3.8-27b_bf16_mtp3_bench.md) | Qwen3.8-27B d0 re-bench on the current build (bf16 KV, MTP3) |
