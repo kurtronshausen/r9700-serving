@@ -103,6 +103,14 @@ services:
     # lower target leaves ~2-3 GiB VRAM headroom per card. Raise to 0.95 when the
     # GPUs are single-tenant (vLLM's boot log prints the equivalent utilization
     # that would spend the remaining headroom on KV cache).
+    # NOTE: --no-async-scheduling is set for MTP/spec-decode profiles only (the
+    # flag tracks VLLM_SPEC_DECODE). On vLLM v0.28.0 async scheduling resolves
+    # to ON by default when the spec method is MTP (EagleModelTypes) — verified
+    # in vllm/config/vllm.py — but the async+MTP+hybrid-GDN+align combination
+    # has an open accepted-count race (vllm-project/vllm#51571, silent token
+    # corruption) and vLLM's own ROCm CI disables async for MTP pending an
+    # unroot-caused hang (vllm-project/vllm#54039 / #32275). Non-MTP profiles
+    # keep async scheduling (decode gap overlap).
     command: >
       ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
@@ -124,4 +132,5 @@ services:
       -tp ${VLLM_TP:-2}
       --attention-backend ROCM_AITER_UNIFIED_ATTN
       ${VLLM_SPEC_DECODE:+--speculative-config '${VLLM_SPEC_DECODE}'}
+      ${VLLM_SPEC_DECODE:+--no-async-scheduling}
       ${VLLM_PROFILER_ARGS:-}

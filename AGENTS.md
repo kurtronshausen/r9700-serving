@@ -244,16 +244,22 @@ touches one of:
     `--prefix-match-unit 400` (in rc2) does not fix the turn-2 miss but halves
     eventual-hit TTFT. Related trigger `#52897` (0 hits with
     `--scheduling-policy priority`) is N/A here — we don't use priority.
+    2026-08-27 `#53749`: two more hybrids (Nemotron-3.5-L 30B, Ling-3.0-flash
+    int4) show exactly 0 hits below one attention block (auto-raised to
+    2096/1920); same family — no action, reinforces the checkpoint fix is the
+    binding constraint.
   - `#53504` (2026-08-24) with MTP, the **first** repeat of an identical
     prompt misses the prefix cache entirely on Qwen3.8-27B hybrid GDN align —
     this stack's exact geometry (TP2, 3 Mamba groups + 1 attn, 256K); the
     second repeat hits. Cause: the EAGLE-adjusted reusable boundary is not a
     boundary the default *sparse* Mamba retention keeps — a side effect of
     `#52216`, which on main promotes `prefix_cache_retention_interval` to a
-    CLI arg and flips the default from `None` (dense, our rc2 behavior) to
-    `0` (semantic checkpoints only). Workaround:
-    `--prefix-cache-retention-interval <block_size>`. Validate with the
-    prefix-cache probe on any v0.29/main bump.
+    CLI arg and flips the default from `None` (dense, our rc2/v0.28.0
+    behavior) to `0` (semantic checkpoints only). Workaround:
+    `--prefix-cache-retention-interval <block_size>` — **flag does not exist
+    on v0.28.0** (verified: `#52216` is main-only, absent from the tag), so
+    defer until a v0.29/main bump. Validate with the prefix-cache probe on any
+    bump.
   - `#53041` RFC: tiered SWA/Mamba checkpointing (HBM tail + periodic store)
     + recompute backfill for divergent hybrid prefix hits (same family as
     `#52959`/`#52789`; monitor)
@@ -276,10 +282,25 @@ touches one of:
     `--limit-mm-per-prompt image: 99` and both 27B models are this GDN hybrid.
     Fix PR `#40709` is **not merged** (absent from v0.28.0rc2). Only workaround
     is avoiding 2+ large (~11.8K vision-token) images in a single request.
+  - `#51571` async MTP align accepted-count race (open): async scheduling +
+    MTP + hybrid GDN + `mamba-cache-mode align` → accepted-token D2H counts
+    gathered from a mutated `InputBatch` after `condense()` (repeated/dropped/
+    garbled tokens). **Relevant, was mislabeled N/A.** On v0.28.0 `async
+    scheduling resolves to ON by default when the spec method is MTP` (MTP is
+    in `EagleModelTypes`; verified in `vllm/config/vllm.py` at the tag) — the
+    "async is auto-disabled on MTP" note was wrong. Mitigation:
+    `compose.yaml` now passes `--no-async-scheduling` for all spec-decode
+    profiles (tracks `VLLM_SPEC_DECODE`); re-check upstream before removing.
+  - `#54039` (2026-08-27, question): vLLM's own ROCm CI disables async+MTP
+    (#32275, unroot-caused shm-broadcast hang) while the default still
+    enables that combination; asks for a default-resolution fix or at least a
+    warning. Same combination we now disable via `--no-async-scheduling`;
+    monitor for a merged default change.
 
 Issues known **not** to apply (checked; re-check only if the stack changes):
-NVIDIA-only (#52475, #52583 VL, #51571 async-MTP — async is auto-disabled for
-MTP), non-Qwen models (#52833/#48568 GLM, #51530 DeepSeek), or paths not
+NVIDIA-only (#52475, #52583 VL), non-Qwen models (#52833/#48568 GLM, #51530
+DeepSeek, #53387 Qwen3.5-family compressed-tensors WNA16 MTP drafter load
+crash — we use FP8, not WNA16), or paths not
 reached here (PP ranks #51752, DP attention #51957, KV connectors #51805/
 #51766/#40017/#53505/#53514, GPTQ #51971, gfx950 MLA #52312). #52897
 (align-mode 0 hits with `--scheduling-policy priority` — variant of #45238;
@@ -317,7 +338,21 @@ GDN — NVIDIA Ada/AWQ, we use fp8 KV; same silent-corruption family, so
 re-check if turboquant KV is ever tried), #52480 (qwen3_5_mtp TP≥2 load
 failure — NVFP4/ModelOpt checkpoints on NVIDIA; our FP8 MTP head loads fine
 at TP=2), #53142 (align pre-copy IMA on prefix-cache resume — requires
-explicit `--block-size`, which we never pass).
+explicit `--block-size`, which we never pass). #53387 (MTP drafter load crash
+on compressed-tensors WNA16 checkpoints — unquantized `mtp.fc` vs packed
+layout; we use FP8, not WNA16). #53887 (MTP drafter allocates a second full
+vocab embedding, OOMing a 27B INT4 on a 24GB card — NVIDIA/INT4; our MTP3
+loads fine on 2×32GB). #53983/#53982 (ROCm spec-decode attention-metadata
+allowlist + `_compute_slot_mapping_kernel` OOB — both concern in-flight model
+PRs, Qwen3.8-Flash-Next `QSAForwardMetadata` and GLM-5.3-Flash `KpoolTailSpec`,
+one-block-per-request side caches not on main; our AITER unified-attention
+metadata is already allowlisted and MTP works, so N/A unless a new backend is
+added). #40980 (R9700 TP2 deadlock — stale: v0.19-era, 16GB cards,
+TRITON_ATTN + enforce-eager; AMD confirmed R9700 TP2 working on v0.25.1; our
+TP2 stack is serving). #49851 (multimodal load failure on gfx1201 in the
+`vit_torch_sdpa_wrapper` — v0.25.1/ROCm 7.15-specific, AMD states it loads on
+v0.26.0+ with `--mm-encoder-tp-mode data`; we serve images on v0.28.0, stale
+for this stack).
 
 ### 4. Local patches vs upstream
 

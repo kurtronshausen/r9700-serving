@@ -306,7 +306,12 @@ stale triage snapshots live in
 Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0 +
 the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
 Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
-KV**, re-validated on v0.28.0, 2026-08-25). The Qwen3.6 rows are the latest
+KV**, re-validated on v0.28.0, 2026-08-25). Since 2026-08-27 the MTP profiles
+also pass `--no-async-scheduling` (vLLM turns async on by default for MTP,
+which is the open `#51571` accepted-count race + the `#54039`/`#32275` ROCm-CI
+hang combination); re-bench shows decode parity — see
+[`benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md`](benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md).
+The Qwen3.6 rows are the latest
 measurements on the current v0.28.0 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
 token-loop fix was re-validated clean — see below). Full methodology, per-run
 files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
