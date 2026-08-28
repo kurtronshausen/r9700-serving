@@ -12,7 +12,7 @@ reference checkpoint) expect, and copies every other tensor unchanged:
 
 Packing convention (vllm .../quant_utils.py::pack_quantized_values_into_int32,
 packed_dim = K): element k of row n lives at bits (k%8)*4 of
-packed[n, k//8]. uint4b8 bias = 7: q = clamp(round(w/scale) + 7, 0, 15).
+packed[n, k//8]. uint4b8 bias = 7: q = clamp(round(w/scale) + 7, 0, 14).
 
 CPU-only, streams the source shards via mmap (peak RAM a few GiB), resumable.
 Run inside the flashnext image (needs torch + safetensors):
@@ -119,7 +119,7 @@ def rtng128(w: torch.Tensor):
     wf = w.to(torch.float32)
     g = wf.reshape(N, K // GROUP_SIZE, GROUP_SIZE)
     scale = g.abs().amax(dim=2).clamp_min(1e-8) / BIAS  # [N, K/128]
-    q = torch.round(g / scale.unsqueeze(2)).clamp(0, 2 * BIAS)
+    q = (torch.round(g / scale.unsqueeze(2)) + BIAS).clamp(0, 2 * BIAS)
     q8 = q.reshape(N, -1).to(torch.int32)  # [N, K]
     words = torch.zeros(N, K // PACK, dtype=torch.int32, device=w.device)
     for i in range(PACK):

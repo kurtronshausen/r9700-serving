@@ -94,8 +94,8 @@ def main():
             p, dt = read_tensor(f"{base0}.{proj}.weight_packed")
             s, sdt = read_tensor(f"{base0}.{proj}.weight_scale")
             sh, sdt2 = read_tensor(f"{base0}.{proj}.weight_shape")
-            assert dt == "I32" and p.shape == [n, k // 8], (proj, p.shape)
-            assert sdt == "BF16" and s.shape == [n, k // 128], (proj, s.shape)
+            assert dt == "I32" and list(p.shape) == [n, k // 8], (proj, p.shape, n, k)
+            assert sdt == "BF16" and list(s.shape) == [n, k // 128], (proj, s.shape, n, k)
             assert sh.tolist() == [n, k]
         assert f"{base0}.gate_proj.weight" not in out_wm
         # passthrough byte-identical
@@ -124,9 +124,11 @@ def main():
                     p, _ = read_tensor(f"{name}.weight_packed")
                     s, _ = read_tensor(f"{name}.weight_scale")
                     w = tensors[f"{name}.weight"]
+                    # uint32 view: int32 arithmetic shift breaks when bit 31 set
+                    pu = p.to(torch.int64) & 0xFFFFFFFF  # unsigned view
                     q = torch.zeros(n, k, dtype=torch.int32)
                     for i in range(8):
-                        q[:, i::8] = (p >> (4 * i)) & 0xF
+                        q[:, i::8] = (pu >> (4 * i)) & 0xF
                     deq = ((q - 7).to(torch.float32) * s.to(torch.float32)
                            .repeat_interleave(128, dim=1))
                     err = (deq - w.to(torch.float32)).abs().max().item()
@@ -154,7 +156,7 @@ def main():
         wf = w.to(torch.float32)
         g = wf.reshape(w.shape[0], -1, 128)
         s = g.abs().amax(dim=2).clamp_min(1e-8) / 7
-        qv = torch.round(g / s.unsqueeze(2)).clamp(0, 14).reshape(w.shape).to(torch.int32)
+        qv = (torch.round(g / s.unsqueeze(2)) + 7).clamp(0, 14).reshape(w.shape).to(torch.int32)
         vllm_packed = pack_quantized_values_into_int32(qv, scalar_types.uint4b8, packed_dim=1)
         assert torch.equal(vllm_packed, packed), "word-level mismatch vs vLLM packer"
         print("3. vLLM packing equivalence: OK")
