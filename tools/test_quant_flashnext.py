@@ -32,21 +32,41 @@ H, IM = 640, 256  # both divisible by 128
 
 
 def mk_tensors():
+    """Real source layout: per-layer 3D expert tensors (main + MTP)."""
     t = {}
     for l in range(L):
-        for e in range(E):
-            base = f"model.language_model.layers.{l}.mlp.experts.{e}"
-            for proj, shape in (("gate_proj", (IM, H)), ("up_proj", (IM, H)),
-                                ("down_proj", (H, IM))):
-                t[f"{base}.{proj}.weight"] = torch.randn(*shape, dtype=torch.bfloat16) * 0.02
+        pre = f"model.language_model.layers.{l}.mlp.experts"
+        # gate/up stored fused: [E, 2*IM, H], gate in the first half (the
+        # split vLLM's RoutedExperts.load_weights does: chunk(2, dim=1))
+        t[f"{pre}.gate_up_proj"] = torch.randn(E, 2 * IM, H, dtype=torch.bfloat16) * 0.02
+        t[f"{pre}.down_proj"] = torch.randn(E, H, IM, dtype=torch.bfloat16) * 0.02
         t[f"model.language_model.layers.{l}.mlp.gate.weight"] = torch.randn(E, H, dtype=torch.bfloat16)
         t[f"model.language_model.layers.{l}.self_attn.q_proj.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
         t[f"model.language_model.layers.{l}.linear_attn.in_proj_qkv.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
         t[f"model.language_model.layers.{l}.ple.ngram_embedding.weight"] = torch.randn(32, H, dtype=torch.bfloat16)
+    mpre = "mtp.layers.0.mlp.experts"
+    t[f"{mpre}.gate_up_proj"] = torch.randn(E, 2 * IM, H, dtype=torch.bfloat16) * 0.02
+    t[f"{mpre}.down_proj"] = torch.randn(E, H, IM, dtype=torch.bfloat16) * 0.02
     t["model.language_model.embed_tokens.weight"] = torch.randn(512, H, dtype=torch.bfloat16)
     t["model.language_model.lm_head.weight"] = torch.randn(512, H, dtype=torch.bfloat16)
     t["visual.proj.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
     return t
+
+
+def expert_source(tensors, name):
+    """Original per-expert [N, K] weight behind an output key."""
+    parts = name.split(".")
+    l = int(parts[parts.index("layers") + 1])
+    e = int(parts[parts.index("experts") + 1])
+    pre = (f"model.language_model.layers.{l}.mlp.experts"
+           if parts[0] == "model" else "mtp.layers.0.mlp.experts")
+    fused = tensors[f"{pre}.gate_up_proj"]
+    down = tensors[f"{pre}.down_proj"]
+    if name.endswith("gate_proj"):
+        return fused[e, :IM]
+    if name.endswith("up_proj"):
+        return fused[e, IM:]
+    return down[e]
 
 
 def main():
@@ -98,7 +118,15 @@ def main():
             assert sdt == "BF16" and list(s.shape) == [n, k // 128], (proj, s.shape, n, k)
             assert sh.tolist() == [n, k]
         assert f"{base0}.gate_proj.weight" not in out_wm
-        # passthrough byte-identical
+        # MTP experts quantized too
+        assert "mtp.layers.0.mlp.experts.0.gate_proj.weight_packed" in out_wm
+        assert "mtp.layers.0.mlp.experts.3.down_proj.weight_scale" in out_wm
+        # gate/up actually split (not swapped / not whole-fused)
+        pg, _ = read_tensor(f"{base0}.gate_proj.weight_packed")
+        pu, _ = read_tensor(f"{base0}.up_proj.weight_packed")
+        assert not torch.equal(pg, pu)
+        # passthrough byte-identical (incl. the 3D expert tensors are GONE)
+        assert "model.language_model.layers.0.mlp.experts.gate_up_proj" not in out_wm
         for k in ("model.language_model.layers.0.self_attn.q_proj.weight",
                   "model.language_model.embed_tokens.weight",
                   "model.language_model.layers.0.mlp.gate.weight",
@@ -113,17 +141,19 @@ def main():
         assert os.path.exists(f"{dst}/tokenizer_config.json")
         print("1. layout: OK")
 
-        # ---- 2. round-trip ----
+        # ---- 2. round-trip (main + MTP layers) ----
         max_err_ratio = 0.0
-        for l in range(L):
+        pres = ([f"model.language_model.layers.{l}.mlp.experts" for l in range(L)]
+                + ["mtp.layers.0.mlp.experts"])
+        for pre in pres:
             for e in range(E):
                 for proj, shape in (("gate_proj", (IM, H)), ("up_proj", (IM, H)),
                                     ("down_proj", (H, IM))):
                     n, k = shape
-                    name = f"model.language_model.layers.{l}.mlp.experts.{e}.{proj}"
+                    name = f"{pre}.{e}.{proj}"
                     p, _ = read_tensor(f"{name}.weight_packed")
                     s, _ = read_tensor(f"{name}.weight_scale")
-                    w = tensors[f"{name}.weight"]
+                    w = expert_source(tensors, name)
                     # uint32 view: int32 arithmetic shift breaks when bit 31 set
                     pu = p.to(torch.int64) & 0xFFFFFFFF  # unsigned view
                     q = torch.zeros(n, k, dtype=torch.int32)
@@ -146,7 +176,7 @@ def main():
         )
         from vllm.scalar_type import scalar_types
 
-        w = tensors[f"{base0}.gate_proj.weight"]
+        w = expert_source(tensors, f"{base0}.gate_proj")
         packed, scale = qf.rtng128(w)
         # unpack mine with vLLM's unpacker, re-pack with vLLM's packer
         vals = unpack_quantized_values_into_int32(packed, scalar_types.uint4b8, packed_dim=1)

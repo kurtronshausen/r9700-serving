@@ -3,7 +3,16 @@
 
 Quantizes the model's routed MoE experts to symmetric int4 / group-128 in the
 exact layout vLLM's compressed-tensors WNA16 path (and the aixiaoma W4A16
-reference checkpoint) expect, and copies every other tensor unchanged:
+reference checkpoint) expect, and copies every other tensor unchanged.
+
+The BF16 source stores experts as per-layer 3D tensors (main + MTP layers):
+
+    layers.N.mlp.experts.gate_up_proj   BF16 [E, 2*IM, K]   (K = hidden)
+    layers.N.mlp.experts.down_proj      BF16 [E, K, IM]
+
+The fused dim splits as vLLM's RoutedExperts.load_weights does
+(`chunk(2, dim=1)`: first half = w1/gate, second half = w3/up). Each expert
+is quantized separately and written as the per-expert 2D keys:
 
     experts.E.{gate,up,down}_proj.weight      BF16 [N, K]
         -> experts.E.{gate,up,down}_proj.weight_packed  I32  [N, K/8]
@@ -39,10 +48,15 @@ GROUP_SIZE = 128
 NUM_BITS = 4
 BIAS = 7  # uint4b8
 PACK = 32 // NUM_BITS  # 8 values per int32
-# Exactly the tensors the reference (aixiaoma) W4A16 checkpoint quantizes.
-QUANT_RE = re.compile(
-    r"^(model\.language_model\.layers\.\d+\.mlp\.experts\.\d+)"
-    r"\.(gate_proj|up_proj|down_proj)\.weight$"
+# The routed-expert 3D tensors in the BF16 source (main + MTP layers).
+# Output is per-expert 2D keys (the WNA16 / aixiaoma layout).
+GATE_UP_RE = re.compile(
+    r"^(?P<pre>(?:model\.language_model|mtp)\.layers\.\d+\.mlp\.experts)"
+    r"\.gate_up_proj$"
+)
+DOWN_RE = re.compile(
+    r"^(?P<pre>(?:model\.language_model|mtp)\.layers\.\d+\.mlp\.experts)"
+    r"\.down_proj$"
 )
 # config.json "ignore" list copied verbatim from the reference checkpoint so
 # vLLM's compressed-tensors scheme selection behaves identically.
@@ -128,6 +142,14 @@ def rtng128(w: torch.Tensor):
     return words, scale.to(torch.bfloat16)
 
 
+def _quant_expert(w, base, wgt):
+    """Quantize one expert projection [N, K] and add the output triple."""
+    packed, scale = rtng128(wgt)
+    w.add(f"{base}.weight_packed", packed.contiguous())
+    w.add(f"{base}.weight_scale", scale.contiguous())
+    w.add(f"{base}.weight_shape", torch.tensor(list(wgt.shape), dtype=torch.int32))
+
+
 class ShardWriter:
     def __init__(self, dst_dir, max_bytes):
         self.dst_dir = dst_dir
@@ -201,8 +223,8 @@ def main():
     w = ShardWriter(dst, max_bytes)
     w.idx = state["out_counter"]
 
-    quant_tensors = sum(1 for k in weight_map if QUANT_RE.match(k))
-    total_experts = len({QUANT_RE.match(k).group(1) for k in weight_map if QUANT_RE.match(k)})
+    fused_keys = [k for k in weight_map if GATE_UP_RE.match(k) or DOWN_RE.match(k)]
+    total_expert_tensors = len(fused_keys)
     done_experts = 0
     t0 = time.time()
 
@@ -219,16 +241,25 @@ def main():
                     continue
                 dtype, shape, off = meta["dtype"], meta["shape"], meta["data_offsets"]
                 raw = mm[data_off + off[0]: data_off + off[1]]
-                m = QUANT_RE.match(name)
+                gu = GATE_UP_RE.match(name)
+                dn = DOWN_RE.match(name) if gu is None else None
                 t = torch.frombuffer(raw, dtype=_DTYPE_MAP[dtype]).reshape(shape)
-                if m:
-                    packed, scale = rtng128(t)
-                    base = name[: -len(".weight")]
-                    w.add(f"{base}.weight_packed", packed.contiguous())
-                    w.add(f"{base}.weight_scale", scale.contiguous())
-                    w.add(f"{base}.weight_shape",
-                          torch.tensor(shape, dtype=torch.int32))
-                    done_experts += 3
+                if gu is not None or dn is not None:
+                    pre, E = (gu or dn).group("pre"), shape[0]
+                    # w1/gate = first half of the fused dim, w3/up = second
+                    # half — the split vLLM's RoutedExperts.load_weights does
+                    # (chunk(2, dim=1)). Quantize expert by expert so the
+                    # fp32 temporaries stay a single expert.
+                    for e in range(E):
+                        if gu is not None:
+                            _quant_expert(w, f"{pre}.{e}.gate_proj",
+                                          t[e, : shape[1] // 2])
+                            _quant_expert(w, f"{pre}.{e}.up_proj",
+                                          t[e, shape[1] // 2:])
+                            done_experts += 2
+                        else:
+                            _quant_expert(w, f"{pre}.{e}.down_proj", t[e])
+                            done_experts += 1
                 else:
                     w.add(name, t.contiguous())
             mm.close()
@@ -258,7 +289,8 @@ def main():
                     index["weight_map"][k] = fn
         json.dump(index, f)
     os.remove(state_path)
-    print(f"DONE: {quant_tensors} expert tensors, {total_experts} experts, "
+    print(f"DONE: {done_experts} expert projections quantized from "
+          f"{total_expert_tensors} fused source tensors, "
           f"{(time.time()-t0)/60:.1f} min")
 
 

@@ -15,9 +15,10 @@ import re
 import struct
 import sys
 
-QUANT_RE = re.compile(
-    r"^(model\.language_model\.layers\.\d+\.mlp\.experts\.\d+)"
-    r"\.(gate_proj|up_proj|down_proj)\.weight$"
+# The source stores experts as per-layer 3D tensors.
+FUSED_RE = re.compile(
+    r"^(?P<pre>(?:model\.language_model|mtp)\.layers\.\d+\.mlp\.experts)"
+    r"\.(gate_up_proj|down_proj)$"
 )
 
 
@@ -31,17 +32,28 @@ def main(src_dir, dst_dir):
     src_wm = json.load(open(os.path.join(src_dir, "model.safetensors.index.json")))["weight_map"]
     dst_wm = json.load(open(os.path.join(dst_dir, "model.safetensors.index.json")))["weight_map"]
 
-    src_experts = {QUANT_RE.match(k).group(0) for k in src_wm if QUANT_RE.match(k)}
-    n_exp_tensors = 3 * len(src_experts)
+    src_fused = {}
+    for k in src_wm:
+        m = FUSED_RE.match(k)
+        if m:
+            src_fused.setdefault(m.group("pre"), {})[m.group(2)] = k
+    expected_packed = set()
+    for pre, kinds in src_fused.items():
+        for kind, key in kinds.items():
+            shard = src_wm[key]
+            hdr = parse_header(os.path.join(src_dir, shard))
+            E = hdr[key]["shape"][0]
+            projs = ("gate_proj", "up_proj") if kind == "gate_up_proj" else ("down_proj",)
+            for e in range(E):
+                for p in projs:
+                    expected_packed.add(f"{pre}.{e}.{p}.weight_packed")
     dst_experts = {k for k in dst_wm if k.endswith(".weight_packed")}
-    assert dst_experts == {f"{b}.{p}.weight_packed"
-                           for b in src_experts
-                           for p in ("gate_proj", "up_proj", "down_proj")}, \
-        f"packed set mismatch: {len(dst_experts)} vs {n_exp_tensors}"
-    leftover = [k for k in dst_wm if QUANT_RE.match(k)]
-    assert not leftover, f"unquantized expert weights remain: {leftover[:3]}"
+    assert dst_experts == expected_packed, \
+        f"packed set mismatch: dst={len(dst_experts)} expected={len(expected_packed)}"
+    leftover = [k for k in dst_wm if FUSED_RE.match(k)]
+    assert not leftover, f"unquantized fused expert tensors remain: {leftover[:3]}"
     # same non-expert tensor count
-    src_other = set(src_wm) - {k for k in src_wm if QUANT_RE.match(k)}
+    src_other = set(src_wm) - set(src_fused.values())
     dst_other = set(dst_wm) - {k for k in dst_wm
                                if any(k.endswith(s) for s in (".weight_packed", ".weight_scale", ".weight_shape"))}
     assert src_other == dst_other, \
@@ -83,8 +95,8 @@ def main(src_dir, dst_dir):
     s, t = total_size(src_dir), total_size(dst_dir)
     ratio = t / s
     assert 0.25 < ratio < 0.7, ratio
-    print(f"VERIFY OK: {len(src_experts)} experts, "
-          f"{n_exp_tensors} packed tensors, passthrough identical, "
+    print(f"VERIFY OK: {len(expected_packed)} packed expert tensors "
+          f"({len(src_fused)} expert layers), passthrough identical, "
           f"size {t/2**30:.1f} GiB = {ratio:.2f}x source ({s/2**30:.1f} GiB)")
 
 
