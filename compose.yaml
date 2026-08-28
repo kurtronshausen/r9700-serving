@@ -24,6 +24,9 @@ x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   # so `just clear-vllm-caches` can manage them.
   - ${HOME}:${HOME}
   - ${HOME}/.vllm-workspace:/workspace
+  # Local checkpoints (RTN/community W4A16 quants, etc.) live under /srv/llm,
+  # outside HOME.
+  - /srv/llm:/srv/llm
 
 x-amd-devices: &amd_devices
   devices:
@@ -162,6 +165,8 @@ services:
       - ./patches/vllm-flashnext/protocol.py:/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/openai/chat_completion/protocol.py:ro
       - ${HOME}:${HOME}
       - ${HOME}/.vllm-workspace:/workspace
+      # Local checkpoints (RTN W4A16 etc.) live under /srv/llm, outside HOME.
+      - /srv/llm:/srv/llm
     env_file:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
