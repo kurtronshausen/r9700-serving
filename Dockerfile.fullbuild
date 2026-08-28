@@ -170,7 +170,6 @@ RUN cd /src/vllm \
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
     cd /src/vllm \
-    && ./tools/install_protoc.sh \
     && bash build_rust.sh
 
 RUN --mount=type=cache,target=/root/.cache/ccache \

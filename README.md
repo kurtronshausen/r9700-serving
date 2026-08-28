@@ -70,15 +70,15 @@ host render group gid for `/dev/dri` access — check with `getent group render`
 |:-------------|:--------|
 | ROCm         | 7.14.0 (`rocm/dev-ubuntu-24.04:7.14.0-full`) |
 | PyTorch      | 2.13.0+rocm7.14.0 |
-| vLLM         | 0.28.0 |
+| vLLM         | 0.28.1rc0 |
 | AITER        | v0.1.20 |
 | Flash Attention | @ 1cc7ff67 |
 
 ROCm 7.14 is on AMDs "TheRock" technology-preview stream (7.9/7.13/7.14); the
 production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.20` is the
-latest tagged release; vLLM is 0.28.0 (rc2 + 3 CI/NVIDIA-only commits, so the
-stable tag == the previously-pinned rc2 in behavior) since `gfx1201` requires
-source builds.
+latest tagged release; vLLM is 0.28.1rc0 (421 commits past v0.28.0, including
+the `--prefix-cache-retention-interval` flag from #52216/#53504) since
+`gfx1201` requires source builds.
 
 The default (active) model is `Qwen/Qwen3.8-27B-FP8` (`qwen3.8-27b`, the
 newest dense 27B hybrid linear/full-attention architecture, MTP trained,
@@ -167,14 +167,14 @@ Version-locked patches applied at runtime by read-only bind-mounts in
 the pinned dependency.
 
 - **Tolerate empty `tools` arrays** (`patches/vllm/protocol.py`, pinned to
-  `VLLM_REF` v0.28.0): some clients send `{"tools": [], "tool_choice":
+  `VLLM_REF` v0.28.1rc0): some clients send `{"tools": [], "tool_choice":
   "none"}`, which upstream rejects with a 400. The overlay treats `tools: []`
   as a no-tools request when `tool_choice` is `"none"`/omitted, while still
   rejecting genuinely invalid combos.
 
 ### Source-build patches (applied at image build time)
 
-Local backport of an upstream fix not in `VLLM_REF` v0.28.0, applied by
+Local backport of an upstream fix not in `VLLM_REF` v0.28.1rc0, applied by
 `Dockerfile.fullbuild` from `patches/vllm/*.patch` (mirrors the aiter patch
 loop). Re-verify each patch applies cleanly on the new ref when bumping
 `VLLM_REF`. (#51812/#51837 were carried as patches on v0.27.1, merged upstream
@@ -318,9 +318,13 @@ files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
 | model                     | MTP (draft #) | KV   | pp2048 t/s | tg32 t/s | tg128 t/s |
 |:--------------------------|:--------------|:-----|-----------:|---------:|----------:|
+| Qwen3.8-27B-FP8 (default, 2026-08-28)³ | **MTP3** | fp8 |  ~3160 |   ~62 |    ~61 |
 | Qwen3.8-27B-FP8 (default, 2026-08-25) | **MTP3** | bf16 |  ~3060 |   ~67 |    ~68 |
 | Qwen3.6-27B-FP8 (2026-08-24)²         | MTP4 | bf16 |   ~1730 |   **80.5** |    ~69 |
 | Qwen3.6-35B-A3B-FP8 (2026-08-24)      | **MTP4** | bf16 |   ~5700 |   **194.9** |   **161.3** |
+
+² no-async scheduling. ³ vLLM 0.28.1rc0 + the retention-interval workaround,
+current live profile (fp8 KV).
 
 ### Depth sweep (Qwen3.8-27B-FP8, 2026-08-22, current default: bf16 KV)
 
