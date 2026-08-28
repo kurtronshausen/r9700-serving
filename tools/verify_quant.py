@@ -90,9 +90,10 @@ def main(src_dir, dst_dir):
         for fn in os.listdir(d):
             if not (fn.startswith("model-") and fn.endswith(".safetensors")):
                 continue
-            off, hh = parse_header(os.path.join(d, fn))
+            # data_offsets are relative to the start of the tensor data
+            hh = parse_header(os.path.join(d, fn))
             tot += max(m["data_offsets"][1] for m in hh.values()
-                       if m.get("data_offsets")) - off
+                       if m.get("data_offsets"))
         return tot
     s, t = total_size(src_dir), total_size(dst_dir)
     ratio = t / s
