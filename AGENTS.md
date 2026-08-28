@@ -59,7 +59,19 @@ aiter JIT dir is shared between the two containers (`just prewarm` builds it
 once). Both containers see all four GPUs; assign non-overlapping GPU sets at
 runtime when running them together (see README "Multiple containers").
 
+## Giant-Server Ops (gsr)
+
+`gsr` (in `~/.local/bin` on the dev machine) wraps the common operations on
+the r9700-serving repo on giant-server (172.20.16.17, default branch
+`qwen38-flashnext`): `gsr pull`, `gsr status` (git head + container + :8001
+health), `gsr build` (just build-flashnext, logs to `.xdg/flashnext-build.log`
+on the server), `gsr up [profile]`, `gsr down`, `gsr logs [N]`, `gsr health`,
+`gsr ask '<cmd>'`. It carries the `XDG_RUNTIME_DIR` workaround `just` needs
+there. Prefer these over ad-hoc ssh one-liners when waiting on builds/logs.
+
 ## Build Caveats
+
+
 
 ### Rebuild Timeouts
 - `just rebuild` (no-cache Docker build) takes **40-60+ minutes** for a full vLLM
