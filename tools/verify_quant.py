@@ -53,7 +53,8 @@ def main(src_dir, dst_dir):
     leftover = [k for k in dst_wm if FUSED_RE.match(k)]
     assert not leftover, f"unquantized fused expert tensors remain: {leftover[:3]}"
     # same non-expert tensor count
-    src_other = set(src_wm) - set(src_fused.values())
+    src_fused_keys = {k for kinds in src_fused.values() for k in kinds.values()}
+    src_other = set(src_wm) - src_fused_keys
     dst_other = set(dst_wm) - {k for k in dst_wm
                                if any(k.endswith(s) for s in (".weight_packed", ".weight_scale", ".weight_shape"))}
     assert src_other == dst_other, \
