@@ -1,7 +1,10 @@
 # Common ROCm/GPU environment for vLLM compose services.
 # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html
-HIP_VISIBLE_DEVICES=0,1
-ROCR_VISIBLE_DEVICES=0,1
+# All four GPUs are visible to every container (4x R9700 host). When running
+# `vllm` and `vllm-vision` concurrently, give them non-overlapping GPU sets at
+# runtime (e.g. HIP_VISIBLE_DEVICES=0,1 for one, 2,3 for the other).
+HIP_VISIBLE_DEVICES=0,1,2,3
+ROCR_VISIBLE_DEVICES=0,1,2,3
 HIP_PLATFORM=amd
 VLLM_TARGET_DEVICE=rocm
 PYTORCH_ROCM_ARCH=gfx1201

@@ -16,7 +16,7 @@ x-vllm-full-cache-volumes: &vllm_full_cache_volumes
   - ./fp8_configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/utils/configs/N=8192,K=5120,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,block_shape=[128,128].json:ro
   # Overlay of protocol.py: tolerate `tools: []` + `tool_choice: "none"` that
   # some clients send (upstream rejects empty tools arrays). Version-locked to
-  # VLLM_REF=v0.28.0; refresh from patches/vllm/protocol.py on upgrade.
+  # VLLM_REF=v0.28.0rc2; refresh from patches/vllm/protocol.py on upgrade.
   - ./patches/vllm/protocol.py:/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/openai/chat_completion/protocol.py:ro
   # Mount the whole home so every tool's dot-dir (caches, kernel JIT dirs) is
   # user-owned on the host. Cache dirs are redirected under ~/.cache via env
@@ -62,7 +62,7 @@ services:
     container_name: vllm
     restart: unless-stopped
     ports:
-      - "8180:8180"
+      - "${PORT:-8000}:8000"
     networks:
       default:
         aliases:
@@ -86,52 +86,69 @@ services:
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
       - VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs
+      # froggeric Qwen chat template for the qwen3.x profiles. entrypoint.sh
+      # omits --chat-template when this is unset, so profiles served by
+      # vllm-vision fall back to the tokenizer's built-in template.
+      - VLLM_CHAT_TEMPLATE=/app/chat-templates/qwen.jinja
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8180/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 600s
-    # NOTE: --max-num-seqs is capped at 2 UNIVERSALLY (compose default) until
-    # vllm-project/vllm#35288 is fixed: MTP spec-decode corrupts output (garbage
-    # header -> repetition loop) when a decode batch reaches 4+ sequences. It
-    # applies to ALL profiles, MTP-enabled or not, so the safe default lives here
-    # (see --max-num-seqs below) rather than only in per-profile env. Raise only
-    # after the upstream bug is addressed.
-    # NOTE: --gpu-memory-utilization defaults to 0.92 (was 0.95): other services
-    # share the GPUs (whisper.cpp Vulkan server on GPU0 via renderD128), so the
-    # lower target leaves ~2-3 GiB VRAM headroom per card. Raise to 0.95 when the
-    # GPUs are single-tenant (vLLM's boot log prints the equivalent utilization
-    # that would spend the remaining headroom on KV cache).
-    # NOTE: --no-async-scheduling is set for MTP/spec-decode profiles only (the
-    # flag tracks VLLM_SPEC_DECODE). On vLLM v0.28.0 async scheduling resolves
-    # to ON by default when the spec method is MTP (EagleModelTypes) — verified
-    # in vllm/config/vllm.py — but the async+MTP+hybrid-GDN+align combination
-    # has an open accepted-count race (vllm-project/vllm#51571, silent token
-    # corruption) and vLLM's own ROCm CI disables async for MTP pending an
-    # unroot-caused hang (vllm-project/vllm#54039 / #32275). Non-MTP profiles
-    # keep async scheduling (decode gap overlap).
-    command: >
-      ${VLLM_MODEL:?set in env/$MODEL_PROFILE.env; start the server with `just up`}
-      --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
-      ${VLLM_MODEL_REVISION:+--revision "${VLLM_MODEL_REVISION}"}
-      --served-model-name ${VLLM_SERVED_NAME:?set in env/$MODEL_PROFILE.env}
-      --limit-mm-per-prompt '{"image": 1, "audio": 0, "video": 0}'
-      --chat-template /app/chat-templates/qwen.jinja
-      ${VLLM_TOOL_CHOICE:-}
-      --max-model-len ${VLLM_MAX_MODEL_LEN:-131072}
-      --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
-      --enable-prefix-caching
-      ${PREFIX_CACHE_RETENTION_INTERVAL:+--prefix-cache-retention-interval ${PREFIX_CACHE_RETENTION_INTERVAL}}
-      --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
-      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.92}
-      --host 0.0.0.0
-      --port 8180
-      --dtype auto
-      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
-      --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:-bfloat16}
-      -tp ${VLLM_TP:-2}
-      --attention-backend ROCM_AITER_UNIFIED_ATTN
-      ${VLLM_SPEC_DECODE:+--speculative-config '${VLLM_SPEC_DECODE}'}
-      ${VLLM_SPEC_DECODE:+--no-async-scheduling}
-      ${VLLM_PROFILER_ARGS:-}
+  # Second, concurrent vLLM server for a vision-language profile. Same image
+  # and entrypoint as `vllm`; it differs only in the env_file profile
+  # (${VISION_MODEL_PROFILE}, exported by the justfile), host port, and
+  # per-container compile cache dirs (so two containers JIT-ing at once never
+  # share mutable cache state). The aiter JIT dir is deliberately SHARED:
+  # `just prewarm` builds it once in the main service's env, and concurrent
+  # readers of already-built kernels are safe — only concurrent builds race.
+  # Both containers see all GPUs (env/2xr9700.vllm.common); assign them
+  # non-overlapping GPU sets at runtime when running both at once.
+  vllm-vision:
+    <<: *amd_devices
+    image: localhost/vllm-fullbuild:latest
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    build:
+      context: .
+      dockerfile: Dockerfile.fullbuild
+      args:
+        ROCM_IMAGE: ${ROCM_IMAGE}
+        GPU_ARCH: ${GPU_ARCH}
+        MAX_JOBS: ${MAX_JOBS}
+        TORCH_VERSION: ${TORCH_VERSION}
+        TORCHVISION_VERSION: ${TORCHVISION_VERSION}
+        VLLM_REF: ${VLLM_REF}
+        VLLM_VERSION: ${VLLM_VERSION}
+        AITER_REF: ${AITER_REF}
+        FLASH_ATTN_REF: ${FLASH_ATTN_REF}
+    container_name: vision-vllm
+    restart: unless-stopped
+    ports:
+      - "${VISION_PORT:-8001}:8000"
+    networks:
+      default:
+        aliases:
+          - llm-vision-backend
+    volumes: *vllm_full_cache_volumes
+    env_file:
+      - env/2xr9700.vllm.common
+      - env/aiter-unified-attention.env
+      - env/qwen3.6.env.common
+      - ./env/${VISION_MODEL_PROFILE}.env
+    environment:
+      - HOME=${HOME}
+      # Shared with the `vllm` service: prewarmed once, read-only afterwards.
+      - AITER_JIT_DIR=${HOME}/.cache/aiter/jit
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_vision
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_vision
+      - TILELANG_CACHE_DIR=${HOME}/.cache/tilelang_vision
+      - GPU_MAX_HW_QUEUES=1
+      - NCCL_P2P_DISABLE=1
+      - VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 600s

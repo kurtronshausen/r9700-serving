@@ -10,7 +10,7 @@ fix landed.
 Usage:
     python3 benchmarks/prefix_cache_probe.py [model] [turns]
 
-Requires a reachable vLLM server (default http://localhost:8180, override with
+Requires a reachable vLLM server (default http://localhost:8000, override with
 VLLM_BASE_URL). Runs from the host or inside the container.
 """
 import os
@@ -19,7 +19,7 @@ import time
 
 import requests
 
-BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:8180")
+BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3.8-27b"
 TURNS = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 SECRET = "the answer to everything is the number 42"

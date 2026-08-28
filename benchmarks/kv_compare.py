@@ -1,6 +1,6 @@
 import json, sys, time, requests
 
-BASE = "http://localhost:8180/v1"
+BASE = "http://localhost:8000/v1"
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3.8-27b"
 OUT = sys.argv[2] if len(sys.argv) > 2 else "/workspace/kv_out.json"
 

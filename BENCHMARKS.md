@@ -1,7 +1,7 @@
 # Benchmarks
 
 Current-state benchmark setup and index for this stack. All benchmarks use
-`llama-benchy` (0.4.0, via `uvx`) against `http://localhost:8180/v1`.
+`llama-benchy` (0.4.0, via `uvx`) against `http://localhost:8000/v1`.
 Historical data (vLLM 0.25/0.26/0.27.0 era, MTP4 35B sweeps, concurrency
 A/Bs) is archived in [`archive/BENCHMARKS.md`](archive/BENCHMARKS.md) with
 per-run files in [`archive/benchmarks/`](archive/benchmarks/).

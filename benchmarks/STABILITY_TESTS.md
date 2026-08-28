@@ -7,7 +7,7 @@ garbage output, and token-loop degeneration under sustained load.
 
 ```sh
 # Verify the server is running and responding
-just check && curl -sf http://localhost:8180/health && echo "OK"
+just check && curl -sf http://localhost:8000/health && echo "OK"
 
 # Check GPU health inside the container
 just exec rocm-smi
@@ -49,7 +49,7 @@ def worker(i):
                 "temperature": 0.7,
                 "chat_template_kwargs": {"enable_thinking": False}
             }
-            resp = requests.post("http://localhost:8180/v1/chat/completions", json=body, timeout=120)
+            resp = requests.post("http://localhost:8000/v1/chat/completions", json=body, timeout=120)
             if resp.status_code != 200:
                 with lock: errors.append(f"W{i} R{r}: HTTP {resp.status_code}")
                 break
@@ -141,7 +141,7 @@ Provide your analysis with these sections:
     }
 
     start = time.time()
-    resp = requests.post("http://localhost:8180/v1/chat/completions", json=body, timeout=600)
+    resp = requests.post("http://localhost:8000/v1/chat/completions", json=body, timeout=600)
     elapsed = time.time() - start
 
     status = resp.status_code
@@ -287,7 +287,7 @@ For EACH section write at least 3 substantial paragraphs with concrete details, 
     }
 
     start = time.time()
-    resp = requests.post("http://localhost:8180/v1/chat/completions", json=body, timeout=600)
+    resp = requests.post("http://localhost:8000/v1/chat/completions", json=body, timeout=600)
     elapsed = time.time() - start
 
     status = resp.status_code
