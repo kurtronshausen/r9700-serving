@@ -38,14 +38,14 @@ def mk_tensors():
             base = f"model.language_model.layers.{l}.mlp.experts.{e}"
             for proj, shape in (("gate_proj", (IM, H)), ("up_proj", (IM, H)),
                                 ("down_proj", (H, IM))):
-                t[f"{base}.{proj}.weight"] = torch.randn(*shape) * 0.02
-        t[f"model.language_model.layers.{l}.mlp.gate.weight"] = torch.randn(E, H)
-        t[f"model.language_model.layers.{l}.self_attn.q_proj.weight"] = torch.randn(H, H)
-        t[f"model.language_model.layers.{l}.linear_attn.in_proj_qkv.weight"] = torch.randn(H, H)
-        t[f"model.language_model.layers.{l}.ple.ngram_embedding.weight"] = torch.randn(32, H)
-    t["model.language_model.embed_tokens.weight"] = torch.randn(512, H)
-    t["model.language_model.lm_head.weight"] = torch.randn(512, H)
-    t["visual.proj.weight"] = torch.randn(H, H)
+                t[f"{base}.{proj}.weight"] = torch.randn(*shape, dtype=torch.bfloat16) * 0.02
+        t[f"model.language_model.layers.{l}.mlp.gate.weight"] = torch.randn(E, H, dtype=torch.bfloat16)
+        t[f"model.language_model.layers.{l}.self_attn.q_proj.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
+        t[f"model.language_model.layers.{l}.linear_attn.in_proj_qkv.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
+        t[f"model.language_model.layers.{l}.ple.ngram_embedding.weight"] = torch.randn(32, H, dtype=torch.bfloat16)
+    t["model.language_model.embed_tokens.weight"] = torch.randn(512, H, dtype=torch.bfloat16)
+    t["model.language_model.lm_head.weight"] = torch.randn(512, H, dtype=torch.bfloat16)
+    t["visual.proj.weight"] = torch.randn(H, H, dtype=torch.bfloat16)
     return t
 
 
@@ -160,8 +160,9 @@ def main():
         print("3. vLLM packing equivalence: OK")
 
         # dequant sanity: vLLM-unpacked values dequantize back to the weights
+        # (bound: 0.5 group-scale rounding + bf16 rounding of the scale itself)
         deq = ((vals.float() - 7) * scale.float().repeat_interleave(128, dim=1))
-        assert (deq - w.float()).abs().max().item() < 0.55 * s.max().item()
+        assert (deq - w.float()).abs().max().item() < 0.56 * s.max().item()
         print("\nALL CHECKS PASSED")
     finally:
         shutil.rmtree(work, ignore_errors=True)

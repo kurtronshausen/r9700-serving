@@ -219,8 +219,8 @@ def main():
                 dtype, shape, off = meta["dtype"], meta["shape"], meta["data_offsets"]
                 raw = mm[data_off + off[0]: data_off + off[1]]
                 m = QUANT_RE.match(name)
+                t = torch.frombuffer(raw, dtype=_DTYPE_MAP[dtype]).reshape(shape)
                 if m:
-                    t = torch.frombuffer(raw, dtype=torch.bfloat16).reshape(shape)
                     packed, scale = rtng128(t)
                     base = name[: -len(".weight")]
                     w.add(f"{base}.weight_packed", packed.contiguous())
@@ -229,7 +229,6 @@ def main():
                           torch.tensor(shape, dtype=torch.int32))
                     done_experts += 3
                 else:
-                    t = torch.frombuffer(raw, dtype=_DTYPE_MAP[dtype]).reshape(shape)
                     w.add(name, t.contiguous())
             mm.close()
         w.flush()
