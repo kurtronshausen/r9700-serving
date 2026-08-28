@@ -113,7 +113,7 @@ that affect this GPU setup and model combo** before recommending a bump.
 ### 1. Upstream release state
 
 ```sh
-# vLLM — current pin VLLM_REF=v0.28.0rc2
+# vLLM — current pin VLLM_REF=v0.28.1rc0
 gh release list -R vllm-project/vllm --limit 8
 
 # AITER — current pin AITER_REF=v0.1.20
@@ -253,13 +253,16 @@ touches one of:
     this stack's exact geometry (TP2, 3 Mamba groups + 1 attn, 256K); the
     second repeat hits. Cause: the EAGLE-adjusted reusable boundary is not a
     boundary the default *sparse* Mamba retention keeps — a side effect of
-    `#52216`, which on main promotes `prefix_cache_retention_interval` to a
-    CLI arg and flips the default from `None` (dense, our rc2/v0.28.0
-    behavior) to `0` (semantic checkpoints only). Workaround:
-    `--prefix-cache-retention-interval <block_size>` — **flag does not exist
-    on v0.28.0** (verified: `#52216` is main-only, absent from the tag), so
-    defer until a v0.29/main bump. Validate with the prefix-cache probe on any
-    bump.
+    `#52216`, which promotes `prefix_cache_retention_interval` to a CLI arg
+    and flips the default from `None` (dense) to `0` (semantic checkpoints
+    only). **Mitigated on v0.28.1rc0 (2026-08-28)**: `#52216` is in the rc, so
+    all three profiles pin `--prefix-cache-retention-interval <block_size>`
+    via `PREFIX_CACHE_RETENTION_INTERVAL` in their env files (1600 on the fp8
+    qwen3.8-27b profile, 832 on bf16 KV, 2112 on 35B-A3B). The compose var is
+    deliberately NOT named `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` — that
+    env var is vLLM-managed, deprecated in v0.28.1, removed in v0.29 (the
+    CLI flag remains). Validate with the prefix-cache probe on any bump;
+    re-check the flag's default on v0.29.
   - `#53041` RFC: tiered SWA/Mamba checkpointing (HBM tail + periodic store)
     + recompute backfill for divergent hybrid prefix hits (same family as
     `#52959`/`#52789`; monitor)
@@ -278,10 +281,11 @@ touches one of:
     family as `#52789`; in flight, not merged)
   - `#40707` hybrid Mamba scheduling deadlock with 2+ large images in one
     prompt (align block-split collapses to 0 → request hangs forever, engine
-    never recovers). Reachable here: all profiles pass
-    `--limit-mm-per-prompt image: 99` and both 27B models are this GDN hybrid.
-    Fix PR `#40709` is **not merged** (absent from v0.28.0rc2). Only workaround
-    is avoiding 2+ large (~11.8K vision-token) images in a single request.
+    never recovers). **Mitigated 2026-08-28**: all profiles now pass
+    `--limit-mm-per-prompt image: 1`, so the 2+-image trigger is unreachable
+    (multi-image prompts are rejected with a 400). Fix PR `#40709` is
+    **not merged** (absent from v0.28.0rc2) — monitor it; re-raise the image
+    cap if it lands.
   - `#51571` async MTP align accepted-count race (open): async scheduling +
     MTP + hybrid GDN + `mamba-cache-mode align` → accepted-token D2H counts
     gathered from a mutated `InputBatch` after `condense()` (repeated/dropped/

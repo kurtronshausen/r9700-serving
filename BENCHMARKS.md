@@ -8,12 +8,14 @@ per-run files in [`archive/benchmarks/`](archive/benchmarks/).
 
 ## Setup (current)
 
-vLLM 0.28.0rc2 + local patches (see README "Source-build patches"), torch 2.13,
+vLLM 0.28.1rc0 + local patches (see README "Source-build patches"), torch 2.13,
 triton 3.8.0, ROCm 7.14.0, AITER v0.1.20 unified attention, froggeric chat
-template v22.3, thinking off. `-tp 2`, `--gpu-memory-utilization 0.92`,
-`GPU_MAX_HW_QUEUES=1`. **bf16 KV** is the default on all profiles (fp8 KV is
-opt-in via `VLLM_KV_CACHE_DTYPE=fp8`); `--max-num-seqs 2` everywhere (the
-#35288 cap); `--max-num-batched-tokens 4096` on 35B-A3B.
+template v22.4, thinking off. `-tp 2`, `--gpu-memory-utilization 0.92`,
+`GPU_MAX_HW_QUEUES=1`. KV cache is **fp8 on qwen3.8-27b** (the live default
+profile) and **bf16 on the 3.6 profiles** (opt-in fp8 via
+`VLLM_KV_CACHE_DTYPE=fp8`); `--max-num-seqs 2` everywhere (the #35288 cap);
+`--max-num-batched-tokens 4096` on 35B-A3B; the `#53504`
+`--prefix-cache-retention-interval` workaround pinned per profile.
 
 Single-request numbers are invariant to `--max-num-seqs`; long-context
 concurrency degrades sharply (see the c1-vs-c2 head-to-head in

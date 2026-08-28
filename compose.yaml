@@ -116,13 +116,13 @@ services:
       --tokenizer ${VLLM_TOKENIZER:?set in env/$MODEL_PROFILE.env}
       ${VLLM_MODEL_REVISION:+--revision "${VLLM_MODEL_REVISION}"}
       --served-model-name ${VLLM_SERVED_NAME:?set in env/$MODEL_PROFILE.env}
-      --limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'
+      --limit-mm-per-prompt '{"image": 1, "audio": 0, "video": 0}'
       --chat-template /app/chat-templates/qwen.jinja
       ${VLLM_TOOL_CHOICE:-}
       --max-model-len ${VLLM_MAX_MODEL_LEN:-131072}
       --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192}
       --enable-prefix-caching
-      ${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:+--prefix-cache-retention-interval ${VLLM_PREFIX_CACHE_RETENTION_INTERVAL}}
+      ${PREFIX_CACHE_RETENTION_INTERVAL:+--prefix-cache-retention-interval ${PREFIX_CACHE_RETENTION_INTERVAL}}
       --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}'
       --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.92}
       --host 0.0.0.0

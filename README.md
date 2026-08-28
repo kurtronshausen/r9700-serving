@@ -91,7 +91,8 @@ Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — two-GPU ROCm config (arch, NCCL, HSA, compile caches)
 - `env/aiter-unified-attention.env` — enables AITER unified attention only
 - `env/qwen3.6.env.common` — shared qwen3.6/3.8 config (KV cache dtype, MTP spec-decode, tool choice)
-- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer, MTP disabled)
+- `env/qwen3.6-35b-a3b.env` — MoE model config (path, tokenizer,
+  `--max-num-batched-tokens 4096` cap)
 - `env/qwen3.6-27b.env` — dense 27B model config
 - `env/qwen3.8-27b.env` — Qwen3.8-27B-FP8 dense model config (same
   architecture as 3.6-27B, so it shares the 3.6 common settings and tuned
@@ -132,10 +133,11 @@ restart anyway).
   --reasoning-parser qwen3`** (`VLLM_TOOL_CHOICE`, all profiles): OpenAI
   tool-calling with Qwen's `qwen3_coder` parser; `--reasoning-parser qwen3` is
   required for the template's `reasoning`/`content` split.
-- **`--limit-mm-per-prompt '{"image": 99, "audio": 0, "video": 0}'`**: images
-  allowed, audio/video disabled. Caveat: 2+ large images in one prompt can
-  deadlock the engine on these GDN hybrids (upstream #40707, fix not merged —
-  see the AGENTS.md watchlist).
+- **`--limit-mm-per-prompt '{"image": 1, "audio": 0, "video": 0}'`**: one
+  image per prompt, audio/video disabled. The cap of 1 fully blocks the
+  2+-large-images engine deadlock on these GDN hybrids (upstream #40707, fix
+  not merged — see the AGENTS.md watchlist); 2+-image prompts are rejected
+  with a 400 instead of hanging the engine.
 - **`--override-generation-config`**: server-side sampling defaults
   (`temperature` 1.0, `top_p` 0.95, `top_k` 20, `min_p` 0, no penalties).
 - **`--enable-prefix-caching`**: reuse KV for shared prompt prefixes (known
@@ -303,16 +305,16 @@ stale triage snapshots live in
 
 ## Performance
 
-Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.0 +
+Measured on 2× R9700 (gfx1201), single request, thinking off, vLLM 0.28.1rc0 +
 the local patch, torch 2.13 (ROCm 7.14.0), tuned MoE/dense GEMM configs. The
-Qwen3.8-27B row is the current default stack (**MTP3**, 256K context, **bf16
-KV**, re-validated on v0.28.0, 2026-08-25). Since 2026-08-27 the MTP profiles
+top Qwen3.8-27B row is the current default stack (**MTP3**, 256K context,
+**fp8 KV**, 2026-08-28). Since 2026-08-27 the MTP profiles
 also pass `--no-async-scheduling` (vLLM turns async on by default for MTP,
 which is the open `#51571` accepted-count race + the `#54039`/`#32275` ROCm-CI
 hang combination); re-bench shows decode parity — see
 [`benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md`](benchmarks/2026-08-27_qwen3.8-27b_no_async_scheduling.md).
 The Qwen3.6 rows are the latest
-measurements on the current v0.28.0 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
+measurements on the v0.28.0 build (2026-08-24); **35B-A3B now ships MTP4** (the #47087 MoE
 token-loop fix was re-validated clean — see below). Full methodology, per-run
 files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 
@@ -326,10 +328,15 @@ files, and history: [`BENCHMARKS.md`](BENCHMARKS.md) and [`archive/`](archive/).
 ² no-async scheduling. ³ vLLM 0.28.1rc0 + the retention-interval workaround,
 current live profile (fp8 KV).
 
-### Depth sweep (Qwen3.8-27B-FP8, 2026-08-22, current default: bf16 KV)
+### Depth sweep (Qwen3.8-27B-FP8)
 
-Current default stack: bf16 KV + **MTP3** + 256K max-model-len, full-context
-prefill at depth:
+Current live profile: fp8 KV + **MTP3** + 256K max-model-len, full-context
+prefill at depth (2026-08-27, `--no-async-scheduling`): pp256K 1277 t/s /
+TTFT 202 s, tg32 holds 41–60 t/s at every depth, coherence passed at every
+depth — full table in
+[`benchmarks/2026-08-27_qwen3.8-27b_depth_no_async.md`](benchmarks/2026-08-27_qwen3.8-27b_depth_no_async.md).
+
+Earlier bf16-KV sweep (2026-08-22) for comparison:
 
 | depth | pp2048 (t/s) | tg32 (t/s) | e2e TTFT (s) |
 |------:|-------------:|-----------:|-------------:|
