@@ -10,18 +10,16 @@ import vllm.model_executor.layers.fused_moe.fused_moe as fm
 from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 
-# The repo serves Qwen3.6-35B-A3B-FP8 at tensor-parallel size 2. vLLM keys the
-# fused MoE config file on the per-GPU geometry (E = local experts, N = local
-# intermediate size), so N is the per-partition intermediate (global 512 / 2).
+# vLLM keys the fused MoE config file on the per-GPU geometry:
+# E = experts (vLLM replicates experts across TP ranks, so E stays global),
+# N = per-partition intermediate (global moe_intermediate_size / TP),
+# K = hidden_size. Defaults below are Qwen3.6-35B-A3B at TP=2 (global 512 / 2);
+# `just tune` / run_tune.py pass the active profile's TP-derived geometry.
 E = 256
 N = 256
 K = 2048
 TOP_K = 8
 BLOCK_SHAPE = [128, 128]
-
-CONFIG_FILE = ("/app/fused_moe_configs/"
-               "E=256,N=256,device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,"
-               "block_shape=[128,128].json")
 
 DEFAULT_CONFIG = {
     "BLOCK_SIZE_M": 16,
@@ -107,14 +105,32 @@ def variants(base: dict):
 
 
 def main():
+    global E, N, K, TOP_K
     ap = argparse.ArgumentParser()
     ap.add_argument("--M", type=str,
                     default="1,2,4,8,16,24,32,48,64,96,128,256,512,1024,1536,2048,3072,4096")
     ap.add_argument("--reps", type=int, default=50)
-    ap.add_argument("--out", type=str, default=CONFIG_FILE)
-    ap.add_argument("--seed", type=str, default=CONFIG_FILE)
+    ap.add_argument("--E", type=int, default=256,
+                    help="experts (global; replicated across TP ranks)")
+    ap.add_argument("--N", type=int, default=256,
+                    help="per-partition intermediate (global / TP)")
+    ap.add_argument("--K", type=int, default=2048, help="hidden size")
+    ap.add_argument("--topk", type=int, default=8,
+                    help="experts routed per token")
+    ap.add_argument("--out", type=str, default=None,
+                    help="config file to write (default: derived from E/N)")
+    ap.add_argument("--seed", type=str, default=None,
+                    help="existing config to seed from (default: --out)")
     ap.add_argument("--no-sweep", action="store_true")
     args = ap.parse_args()
+
+    E, N, K, TOP_K = args.E, args.N, args.K, args.topk
+    if args.out is None:
+        args.out = (f"/app/fused_moe_configs/E={E},N={N},"
+                    f"device_name=AMD_Radeon_R9700,dtype=fp8_w8a8,"
+                    f"block_shape={[128,128]}.json")
+    if args.seed is None:
+        args.seed = args.out
 
     print(f"triton {triton.__version__}", flush=True)
     Ms = [int(x) for x in args.M.split(",")]

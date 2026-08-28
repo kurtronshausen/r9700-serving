@@ -13,6 +13,18 @@ model := env_var_or_default('MODEL_PROFILE', 'qwen3.8-27b')
 # Exported so compose can resolve the `env_file:` path for the model profile.
 export MODEL_PROFILE := model
 
+# Physical GPU index the `tune` container benchmarks on. All four GPUs are
+# visible to every container, so a running `vllm` server shares the box; pick
+# `tune_gpu` to steer contention (or stop the server — tuning is independent
+# of it). Override: `just --set tune_gpu 3 tune` or TUNE_GPU=3.
+tune_gpu := env_var_or_default('TUNE_GPU', '0')
+
+# Explicit dense GEMM shapes ("N:K,N:K") for `tune`. Leave empty to
+# auto-discover from the `vllm` container's startup warnings. Needed only when
+# the server has already been stopped and its logs are gone.
+# Override: `just --set shapes "5120:4352,5120:5120" tune`
+shapes := ''
+
 # Vision model profile: selects env/${vision_model}.env for the `vllm-vision`
 # service (a second, concurrent container on its own port and cache dirs).
 # Override with `just --set vision_model <profile>` or
@@ -141,6 +153,44 @@ prewarm: check ensure-cache-dirs
     {{compose}} run -T --rm --no-deps --entrypoint python vllm \
         -c "import aiter; from aiter.ops.triton.unified_attention import unified_attention"
     printf 'aiter pre-warm complete.\n'
+
+# Tune the Triton GEMM kernel configs for the selected model profile (dense
+# w8a8 block-FP8 + fused MoE) in a throwaway container, independent of the
+# running `vllm` service: `just down`/`just up` mid-tune won't interrupt it
+# (separate container; it shares only the GPUs and the compile caches).
+#
+# Dense shapes are auto-discovered from the `vllm` container's startup
+# warnings ("Using default W8A8 Block FP8 kernel config ... N=*,K=*"), so the
+# server must have been started once with this profile+TP. If it has been
+# stopped and the logs are gone, override with `--set shapes "N:K,N:K"`.
+# MoE tuning runs automatically for MoE profiles only, at the profile's TP
+# (VLLM_TP). Results land in ./fp8_configs and ./fused_moe_configs (rw
+# mounts); the next `just up` picks them up. Slow on a cold Triton cache
+# (hours) — it is interrupt/resume-safe (compiles persist in
+# ~/.cache/triton), and each shape writes its file as it completes.
+tune: check ensure-cache-dirs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{shapes}}" ]; then
+        dense_shapes="{{shapes}}"
+    else
+        dense_shapes="$( {{runtime}} logs vllm 2>&1 \
+            | grep -oE 'N=[0-9]+,K=[0-9]+' \
+            | sed 's/N=//; s/,K=/:/' | sort -u | paste -sd, - || true )"
+        if [ -z "$dense_shapes" ]; then
+            printf 'error: no missing W8A8 block-FP8 shapes in the `vllm` container logs.\n' >&2
+            printf 'Start the server once (just up) so it logs them, or pass them explicitly:\n' >&2
+            printf '  just --set shapes "N:K,N:K" tune\n' >&2
+            exit 1
+        fi
+    fi
+    printf 'Tuning on GPU {{tune_gpu}} (dense shapes: %s) ...\n' "$dense_shapes"
+    {{compose}} run -T --rm --no-deps \
+        -e DENSE_SHAPES="$dense_shapes" \
+        -e REPO_DIR="$PWD" \
+        -e HIP_VISIBLE_DEVICES="{{tune_gpu}}" \
+        --entrypoint python vllm "$PWD/tools/run_tune.py"
+    printf 'Tune complete. Run `just up` to pick up the new configs, then `just bench`.\n'
 
 # Ensure the selected profile's calibrated KV-scale model copy exists. Profiles
 # that want calibrated fp8 KV declare VLLM_MODEL_ID (HF source id) + VLLM_MODEL

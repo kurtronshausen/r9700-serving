@@ -17,6 +17,7 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just up` | start the vLLM servers (runs `check`, `ensure-cache-dirs`, `prewarm`, starts both containers, waits for main readiness, runs warmup) |
 | `just prewarm` | build shared aiter JIT kernels in one throwaway container (runs automatically before every `up`) |
 | `just bench` | benchmark the selected model via `llama-benchy` (pp2048, tg32+128) |
+| `just tune` | tune Triton GEMM kernel configs for the selected profile (dense W8A8 block-FP8 + fused MoE) in a throwaway container on one GPU; independent of the running `vllm` service, results picked up on next `just up` |
 | `just logs [service]` | follow container logs (all services, or one: `just logs vllm-vision`) |
 | `just down` | stop and remove the containers |
 | `just exec <cmd>` | run a command inside the running container (e.g. `just exec bash`) |
@@ -110,6 +111,26 @@ running them together (see README "Multiple containers").
 - If `just rebuild` terminates (signal 15 / timeout), check the image with
   `docker inspect localhost/vllm-fullbuild:latest` to verify completion before
   attempting `just up`.
+
+### GEMM Kernel Config Tuning
+- vLLM keys its Triton GEMM kernel configs on the **per-GPU shape** (dense W8A8
+  block-FP8: `N=*,K=*`; fused MoE: `E=*,N=*`), so the tuned files in
+  `fp8_configs/` / `fused_moe_configs/` **go stale whenever a profile's TP
+  changes** — the server then silently runs stock defaults (warning:
+  "Using default W8A8 Block FP8 kernel config"). After a TP change, re-tune.
+- `just tune` does this in a throwaway container (same image, `tools/run_tune.py`
+  driver): dense shapes are auto-discovered from the `vllm` container's
+  startup warnings (`--set shapes "N:K,..."` when the server was already
+  stopped), and MoE tuning runs automatically for MoE profiles only, at the
+  profile's `VLLM_TP`. It benchmarks on a single GPU
+  (`just --set tune_gpu 3 tune`) so a running `vllm` service can be
+  stopped/started freely mid-tune; results land in the repo config dirs and
+  are picked up on the next `just up`.
+- Budget time: on a cold `~/.cache/triton` the first shape takes ~1-5h
+  (one-time kernel compiles), each later shape ~30-90min (cached). It is
+  interrupt/resume-safe and writes each shape's file as it completes. Expected
+  gain (README A/B, 27B at TP=2): ~+19% tg32 decode, ~+3% pp2048 — decode
+  wins dominate for conversational workloads.
 
 ## Checking for Updates
 
