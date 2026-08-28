@@ -25,15 +25,11 @@ tune_gpu := env_var_or_default('TUNE_GPU', '0')
 # Override: `just --set shapes "5120:4352,5120:5120" tune`
 shapes := ''
 
-# Vision model profile: selects env/${vision_model}.env for the `vllm-vision`
-# service (a second, concurrent container on its own port and cache dirs).
-# Override with `just --set vision_model <profile>` or
-# `VISION_MODEL_PROFILE=<profile> just <recipe>`.
-vision_model := env_var_or_default('VISION_MODEL_PROFILE', 'qwen2.5-vl-72b-instruct')
-
-# Exported so compose can resolve the `env_file:` path for the vision profile.
-export VISION_MODEL_PROFILE := vision_model
-
+# The second, concurrent service is fixed to the Qwen3.8-Flash-Next profile
+# (env/qwen3.8-flash-next.env, `vllm-qwen-flashnext` service, port 8001,
+# built from Dockerfile.flashnext). It is not started by `just up` — see
+# `just up-flashnext`.
+#
 # Every compose call must load `.env` (build pins) plus the env_file stack
 # that compose.yaml declares (common → aiter → qwen3.6 → profile), because
 # passing --env-file disables the implicit .env resolution, so each must be
@@ -51,7 +47,7 @@ check:
         printf 'error: no .env found. Copy the template: cp .env.example .env\n' >&2
         exit 1
     fi
-    for p in "env/{{model}}.env" "env/{{vision_model}}.env"; do
+    for p in "env/{{model}}.env" "env/qwen3.8-flash-next.env"; do
         if [ ! -r "$p" ]; then
             printf 'error: no such model profile: %s\n' "$p" >&2
             printf 'available profiles:\n' >&2
@@ -63,9 +59,9 @@ check:
         fi
     done
     {{compose}} config --quiet
-    printf 'Config OK (model: %s, vision: %s).\n' \
+    printf 'Config OK (model: %s, flashnext: %s).\n' \
         "$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2-)" \
-        "$(grep -m1 '^VLLM_MODEL=' "env/{{vision_model}}.env" | cut -d= -f2-)"
+        "$(grep -m1 '^VLLM_MODEL=' "env/qwen3.8-flash-next.env" | cut -d= -f2-)"
 
 # Ensure the whole-home mount sources exist and are owned by the current user.
 # Docker's daemon pre-creates missing bind-mount sources as root, which breaks
@@ -109,10 +105,10 @@ clear-vllm-caches:
         "$HOME/.cache/comgr"
         "$HOME/.cache/tvm-ffi"
         "$HOME/.cache/tilelang"
-        # vllm-vision service's per-container compile caches
-        "$HOME/.cache/triton_vision"
-        "$HOME/.cache/torchinductor_vision"
-        "$HOME/.cache/tilelang_vision"
+        # vllm-qwen-flashnext service's per-container compile caches
+        "$HOME/.cache/triton_flashnext"
+        "$HOME/.cache/torchinductor_flashnext"
+        "$HOME/.cache/tilelang_flashnext"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -128,11 +124,25 @@ clear-vllm-caches:
         fi
     done
 
+# Build the MAIN image (Dockerfile.fullbuild, VLLM_REF) for the `vllm`
+# service only. The flashnext image is separate — `just build-flashnext` —
+# so day-to-day 27b work never rebuilds (or needs) the Qwen4 stack.
 build: check
-    @{{compose}} build
+    @{{compose}} build vllm
+
+# Build the Qwen3.8-Flash-Next image (Dockerfile.flashnext,
+# FLASHNEXT_VLLM_REF + patches/vllm-flashnext/) for the
+# `vllm-qwen-flashnext` service. Stages identical to the main build hit the
+# shared docker layer cache; expect ~15-30 min on a warm cache (the vLLM
+# stage only), 40-60 min cold.
+build-flashnext: check
+    @{{compose}} build vllm-qwen-flashnext
 
 rebuild: check
-    @{{compose}} build --no-cache
+    @{{compose}} build --no-cache vllm
+
+rebuild-flashnext: check
+    @{{compose}} build --no-cache vllm-qwen-flashnext
 
 # Build the shared aiter JIT infrastructure (module_aiter_core, the
 # unified-attention triton kernels) in a single throwaway process BEFORE the
@@ -233,19 +243,18 @@ clear-kvscales:
         printf 'no local model copy for profile %s.\n' "{{model}}"
     fi
 
+# Start the MAIN `vllm` service (the selected 27b/35b profile). The
+# Qwen3.8-Flash-Next service is separate: `just up-flashnext` (requires
+# `just build-flashnext` first).
 up: check ensure-cache-dirs prewarm ensure-kvscales
     #!/usr/bin/env bash
     set -euo pipefail
     served_name="$(grep -m1 '^VLLM_SERVED_NAME=' "env/{{model}}.env" | cut -d= -f2-)"
-    # Host ports are overridable in .env (PORT / VISION_PORT); compose defaults
-    # are 8000 (vllm) and 8001 (vllm-vision).
+    # Host ports are overridable in .env (PORT / FLASHNEXT_PORT); compose
+    # defaults are 8000 (vllm) and 8001 (vllm-qwen-flashnext).
     port="$(grep -m1 '^PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
     port="${port:-8000}"
-    vision_port="$(grep -m1 '^VISION_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
-    vision_port="${vision_port:-8001}"
-    # Starts BOTH services (`vllm` + `vllm-vision`); the vision container
-    # keeps loading in the background while we wait on the main one.
-    {{compose}} up -d
+    {{compose}} up -d vllm
     printf 'Waiting for server to be ready ...\n'
     ready=0
     for _ in $(seq 1 150); do
@@ -269,19 +278,30 @@ up: check ensure-cache-dirs prewarm ensure-kvscales
         printf 'error: warmup request failed. Run `just logs`.\n' >&2
         exit 1
     fi
-    printf 'Vision profile %s starting at http://localhost:%s/v1 (large model —\n' "{{vision_model}}" "$vision_port"
-    printf 'check readiness with `just logs vllm-vision` or `just compose ps`).\n'
+
+# Start the Qwen3.8-Flash-Next service (concurrent with `vllm`; assign it
+# non-overlapping GPUs at runtime when running both — see README). Needs
+# `just build-flashnext` first, and ~110 GiB of free host RAM for the
+# pinned PLE table.
+up-flashnext: check ensure-cache-dirs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    flashnext_port="$(grep -m1 '^FLASHNEXT_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    flashnext_port="${flashnext_port:-8001}"
+    {{compose}} up -d vllm-qwen-flashnext
+    printf 'vllm-qwen-flashnext starting at http://localhost:%s/v1 (large model —\n' "$flashnext_port"
+    printf 'check readiness with `just logs vllm-qwen-flashnext` or `just compose ps`).\n'
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:
     @{{compose}} exec vllm {{args}}
 
-# `just logs` follows all services; `just logs vllm-vision` one of them.
+# `just logs` follows all services; `just logs vllm-qwen-flashnext` one of them.
 logs *args:
     @{{compose}} logs -f {{args}}
 
 # Raw compose passthrough for service-level ops
-# (e.g. `just compose up -d vllm`, `just compose ps`, `just compose down vllm-vision`).
+# (e.g. `just compose up -d vllm`, `just compose ps`, `just compose down vllm-qwen-flashnext`).
 compose *args:
     @{{compose}} {{args}}
 

@@ -96,53 +96,84 @@ services:
       timeout: 5s
       retries: 3
       start_period: 600s
-  # Second, concurrent vLLM server for a vision-language profile. Same image
-  # and entrypoint as `vllm`; it differs only in the env_file profile
-  # (${VISION_MODEL_PROFILE}, exported by the justfile), host port, and
-  # per-container compile cache dirs (so two containers JIT-ing at once never
+  # Second, concurrent vLLM server for Qwen3.8-Flash-Next (qwen4_exp). Same
+  # entrypoint as `vllm`, but built from Dockerfile.flashnext — byte-identical
+  # stages except the vLLM build, which applies patches/vllm-flashnext/
+  # (newer vLLM head carrying qwen4_exp support + the local PLE CPU-offload
+  # patch) at FLASHNEXT_VLLM_REF/FLASHNEXT_VLLM_VERSION. The pins are
+  # separate from the main service's VLLM_REF, so the two images build and
+  # cache independently: switching back to the qwen3.8-27b stack never
+  # touches the flashnext image (and vice versa).
+  #
+  # The PLE n-gram table (~51 GiB) stays in pinned HOST memory
+  # (VLLM_PLE_CPU_OFFLOAD=1 in the profile env) — the host needs ~110 GiB of
+  # free RAM.
+  #
+  # Per-container compile cache dirs (so two containers JIT-ing at once never
   # share mutable cache state). The aiter JIT dir is deliberately SHARED:
   # `just prewarm` builds it once in the main service's env, and concurrent
   # readers of already-built kernels are safe — only concurrent builds race.
   # Both containers see all GPUs (env/2xr9700.vllm.common); assign them
   # non-overlapping GPU sets at runtime when running both at once.
-  vllm-vision:
+  #
+  # Its volumes list duplicates the x-vllm-full-cache-volumes anchor with a
+  # different protocol.py overlay: the two images carry different vLLM trees,
+  # so the overlays are version-locked separately
+  # (patches/vllm-flashnext/protocol.py vs patches/vllm/protocol.py).
+  vllm-qwen-flashnext:
     <<: *amd_devices
-    image: localhost/vllm-fullbuild:latest
+    image: localhost/vllm-flashnext:latest
     user: "${USER_UID:-1000}:${USER_GID:-1000}"
     build:
       context: .
-      dockerfile: Dockerfile.fullbuild
+      dockerfile: Dockerfile.flashnext
       args:
         ROCM_IMAGE: ${ROCM_IMAGE}
         GPU_ARCH: ${GPU_ARCH}
         MAX_JOBS: ${MAX_JOBS}
         TORCH_VERSION: ${TORCH_VERSION}
         TORCHVISION_VERSION: ${TORCHVISION_VERSION}
-        VLLM_REF: ${VLLM_REF}
-        VLLM_VERSION: ${VLLM_VERSION}
+        VLLM_REF: ${FLASHNEXT_VLLM_REF}
+        VLLM_VERSION: ${FLASHNEXT_VLLM_VERSION}
         AITER_REF: ${AITER_REF}
         FLASH_ATTN_REF: ${FLASH_ATTN_REF}
-    container_name: vision-vllm
+    container_name: flashnext-vllm
     restart: unless-stopped
     ports:
-      - "${VISION_PORT:-8001}:8000"
+      - "${FLASHNEXT_PORT:-8001}:8000"
     networks:
       default:
         aliases:
-          - llm-vision-backend
-    volumes: *vllm_full_cache_volumes
+          - llm-flashnext-backend
+    # FLASHNEXT_PROFILE selects the flashnext model profile (default: the
+    # full W4A16 model; qwen3.8-flash-next-tiny = 119 MB Qwen4Exp smoke
+    # model that coexists with the running 27b service). Override at
+    # runtime: FLASHNEXT_PROFILE=qwen3.8-flash-next-tiny just up-flashnext
+    volumes:
+      - ./chat-templates/:/app/chat-templates
+      - ./fused_moe_configs/:/app/fused_moe_configs
+      - ./tools/tune_fused_moe.py:/app/tune_fused_moe.py
+      - ./fp8_configs/:/app/fp8_configs
+      - ./tools/tune_fp8_dense.py:/app/tune_fp8_dense.py
+      # Overlay of protocol.py: tolerate `tools: []` + `tool_choice: "none"`
+      # that some clients send (upstream rejects empty tools arrays).
+      # Version-locked to FLASHNEXT_VLLM_REF=2a4cd640; refresh from
+      # patches/vllm-flashnext/protocol.py on upgrade.
+      - ./patches/vllm-flashnext/protocol.py:/opt/venv/lib/python3.12/site-packages/vllm/entrypoints/openai/chat_completion/protocol.py:ro
+      - ${HOME}:${HOME}
+      - ${HOME}/.vllm-workspace:/workspace
     env_file:
       - env/2xr9700.vllm.common
       - env/aiter-unified-attention.env
       - env/qwen3.6.env.common
-      - ./env/${VISION_MODEL_PROFILE}.env
+      - ./env/${FLASHNEXT_PROFILE:-qwen3.8-flash-next}.env
     environment:
       - HOME=${HOME}
       # Shared with the `vllm` service: prewarmed once, read-only afterwards.
       - AITER_JIT_DIR=${HOME}/.cache/aiter/jit
-      - TRITON_CACHE_DIR=${HOME}/.cache/triton_vision
-      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_vision
-      - TILELANG_CACHE_DIR=${HOME}/.cache/tilelang_vision
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_flashnext
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_flashnext
+      - TILELANG_CACHE_DIR=${HOME}/.cache/tilelang_flashnext
       - GPU_MAX_HW_QUEUES=1
       - NCCL_P2P_DISABLE=1
       - VLLM_TUNED_CONFIG_FOLDER=/app/fused_moe_configs
@@ -151,4 +182,4 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 600s
+      start_period: 900s

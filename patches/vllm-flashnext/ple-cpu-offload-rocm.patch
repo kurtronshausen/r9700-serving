@@ -1,0 +1,247 @@
+From e453e6cd6ca5c5bc1b490d494a3264dccda33d30 Mon Sep 17 00:00:00 2001
+From: Kurt Ronshausen <kurt.ronshausen@telusagcg.com>
+Date: Thu, 27 Aug 2026 12:36:39 -0700
+Subject: [PATCH] feat(qwen4_exp): PLE n-gram table CPU offload for AMD (ROCm)
+
+Port of the SGLang pinned-host PLE offload design onto the AMD model
+path. Opt-in via VLLM_PLE_CPU_OFFLOAD=1 (default off; GPU-resident
+behavior unchanged).
+
+- PLE ngram embedding shards are loaded into a pinned host table
+  (TP-sharded, ~12.8 GiB/rank for Qwen3.8-Flash-Next at TP4) and the
+  GPU copy is dropped on first forward.
+- A Triton kernel gathers rows from pinned host memory directly into
+  the GPU, followed by a tensor-parallel all-reduce to match
+  VocabParallelEmbedding's masked-gather semantics (rows owned by
+  other ranks read zero locally).
+- Uses no CUDA IPC / driver stream semantics, so the CUDA-only
+  vllm#53899 machinery (and its seccomp:unconfined requirement) is
+  not needed.
+
+Base: 2a4cd640 (vllm#53896 head, release/qwen38next).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ vllm/envs.py                           |   6 ++
+ vllm/models/qwen4_exp/amd/ple_layer.py | 133 ++++++++++++++++++++++++-
+ 2 files changed, 137 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/envs.py b/vllm/envs.py
+index a24debdeb..7544da92d 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -138,6 +138,7 @@ if TYPE_CHECKING:
+     VLLM_ROCM_USE_AITER_MOE: bool = True
+     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
++    VLLM_PLE_CPU_OFFLOAD: bool = False
+     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+     VLLM_ROCM_USE_AITER_MLA: bool = True
+     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
+@@ -1254,6 +1255,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     "VLLM_ROCM_USE_AITER_MOE": lambda: (
+         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+     ),
++    # Keep Qwen4Exp PLE n-gram embedding tables in pinned host memory and
++    # gather rows onto the GPU with a Triton kernel (AMD/ROCm).
++    "VLLM_PLE_CPU_OFFLOAD": lambda: (
++        os.getenv("VLLM_PLE_CPU_OFFLOAD", "False").lower() in ("true", "1")
++    ),
+     # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
+     # interleaved flydsl kernels instead of the default a16w4 separated path.
+     # This is the only flag users need: vLLM picks the kernels by passing
+diff --git a/vllm/models/qwen4_exp/amd/ple_layer.py b/vllm/models/qwen4_exp/amd/ple_layer.py
+index a1a600c9c..7e22aaff5 100644
+--- a/vllm/models/qwen4_exp/amd/ple_layer.py
++++ b/vllm/models/qwen4_exp/amd/ple_layer.py
+@@ -9,7 +9,9 @@ import torch
+ import torch.nn.functional as F
+ from torch import nn
+ 
++from vllm import envs
+ from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
++from vllm.distributed import tensor_model_parallel_all_reduce
+ from vllm.forward_context import get_forward_context
+ from vllm.model_executor.layers.linear import ReplicatedLinear
+ from vllm.model_executor.layers.mamba.abstract import MambaBase
+@@ -25,6 +27,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
+ from vllm.transformers_utils.configs.qwen4_exp import (
+     Qwen4ExpTextConfig,
+ )
++from vllm.triton_utils import tl, triton
+ from vllm.utils.torch_utils import direct_register_custom_op
+ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+ from vllm.v1.attention.backends.short_conv_attn import (
+@@ -90,6 +93,84 @@ def _nth_prime_after(start: int, count: int) -> int:
+     return prime
+ 
+ 
++@triton.jit
++def _ple_gather_from_pinned_kernel(
++    table_ptr,  # pinned host: [local_rows, head_dim]
++    ids_ptr,  # GPU int64: [num_tokens, heads]
++    out_ptr,  # GPU: [num_tokens, heads * head_dim]
++    num_tokens: tl.int64,
++    tp_start: tl.int64,
++    local_rows: tl.int64,
++    heads: tl.constexpr,
++    head_dim: tl.constexpr,
++    head_dim_pow2: tl.constexpr,
++    block_n: tl.constexpr,
++):
++    """Gather PLE rows from pinned host memory into the GPU.
++
++    ``table`` holds this rank's TP vocabulary shard (global rows
++    ``tp_start .. tp_start + local_rows``), so ids owned by other ranks
++    read as zero here and are completed by the caller's all-reduce.
++    """
++    pid_n = tl.program_id(0)
++    head = tl.program_id(1)
++    rows = pid_n * block_n + tl.arange(0, block_n)
++    row_mask = rows < num_tokens
++    dim = tl.arange(0, head_dim_pow2)
++    dim_mask = dim < head_dim
++    ids = tl.load(ids_ptr + rows * heads + head, mask=row_mask, other=0)
++    local_idx = ids - tp_start
++    valid = (local_idx >= 0) & (local_idx < local_rows)
++    values = tl.load(
++        table_ptr + local_idx[:, None] * head_dim + dim[None, :],
++        mask=row_mask[:, None] & dim_mask[None, :] & valid[:, None],
++        other=0.0,
++    )
++    tl.store(
++        out_ptr
++        + rows[:, None] * (heads * head_dim)
++        + head * head_dim
++        + dim[None, :],
++        values,
++        mask=row_mask[:, None] & dim_mask[None, :],
++    )
++
++
++def ple_gather_from_pinned(
++    table: torch.Tensor,
++    ngram_ids: torch.Tensor,
++    tp_start: int,
++) -> torch.Tensor:
++    """Gather ``ngram_ids`` from a pinned host TP shard of the PLE table.
++
++    Returns a ``[num_tokens, heads * head_dim]`` GPU tensor with the layout
++    of ``VocabParallelEmbedding(ngram_ids).flatten(-2)`` for the rows owned
++    by this rank; rows owned by other ranks are zero (see the caller's
++    tensor-parallel all-reduce).
++    """
++    num_tokens, heads = ngram_ids.shape
++    head_dim = table.shape[1]
++    output = torch.empty(
++        (num_tokens, heads * head_dim),
++        device=ngram_ids.device,
++        dtype=table.dtype,
++    )
++    block_n = 32
++    _ple_gather_from_pinned_kernel[(triton.cdiv(num_tokens, block_n), heads)](
++        table,
++        ngram_ids,
++        output,
++        num_tokens,
++        tp_start,
++        table.shape[0],
++        heads=heads,
++        head_dim=head_dim,
++        head_dim_pow2=triton.next_power_of_2(head_dim),
++        block_n=block_n,
++    )
++    return output
++
++
+ class Qwen4ExpPLEGroupedNorm(nn.Module):
+     def __init__(
+         self,
+@@ -213,6 +294,30 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+             persistent=False,
+         )
+ 
++        self.ple_offload = envs.VLLM_PLE_CPU_OFFLOAD
++        self._ple_host_table: torch.Tensor | None = None
++        self._ple_gpu_freed = False
++
++    def _ple_host_table(self, embedding: VocabParallelEmbedding) -> torch.Tensor:
++        """Lazily allocate this rank's pinned host copy of the ngram table."""
++        table = self._ple_host_table
++        if table is None:
++            # zeros (not empty): global padding-region rows must read as zero,
++            # matching the GPU path's zero-padded VocabParallelEmbedding.
++            table = torch.zeros(
++                tuple(embedding.weight.shape),
++                dtype=embedding.weight.dtype,
++                pin_memory=True,
++            )
++            self._ple_host_table = table
++        return table
++
++    def _ple_free_gpu_table(self) -> None:
++        if not self._ple_gpu_freed:
++            weight = self.ngram_embedding.weight
++            weight.data = torch.empty(0, device=weight.device, dtype=weight.dtype)
++            self._ple_gpu_freed = True
++
+     @staticmethod
+     def _shift_precompute(
+         tokens: torch.Tensor, eos_token_id: int
+@@ -268,6 +373,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+                 f"PLE received {num_reqs} requests, but its workspace supports "
+                 f"at most {self.padded_buffer.shape[0]}"
+             )
++        if self.ple_offload:
++            # The pinned host table is fully loaded by now; drop the GPU copy
++            # (runs during the first/dummy forward, so the freed shard
++            # returns to the pool before KV cache sizing is final).
++            self._ple_free_gpu_table()
+ 
+         positions = self.positions_buffer[:num_tokens]
+         packed = self.padded_buffer[:num_reqs]
+@@ -376,8 +486,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+                         f"expected {expected_shape}, got "
+                         f"{tuple(loaded_weight.shape)}"
+                     )
++                destination = (
++                    self._ple_host_table(embedding)
++                    if self.ple_offload
++                    else embedding.weight.data
++                )
+                 copy_ple_embedding_shard_(
+-                    embedding.weight.data,
++                    destination,
+                     loaded_weight,
+                     checkpoint_start=checkpoint_start,
+                     tp_start=embedding.shard_indices.org_vocab_start_index,
+@@ -1045,11 +1160,25 @@ def qwen4_exp_amd_ple_ngram_embedding(
+ 
+     Keeping the embedding weight in ``static_forward_context`` prevents AOT
+     compile-time autotuning from materializing a synthetic copy of the weight.
++    With ``VLLM_PLE_CPU_OFFLOAD=1`` the table lives in pinned host memory and
++    rows are gathered by a Triton kernel instead of a GPU embedding lookup.
+     """
+     layer = get_forward_context().no_compile_layers[layer_name]
+     if not isinstance(layer, Qwen4ExpPLELayer):
+         raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
+-    result = layer.ple_embedding.ngram_embedding(ngram_ids).flatten(-2)
++    ple_embedding = layer.ple_embedding
++    if ple_embedding.ple_offload:
++        embedding = ple_embedding.ngram_embedding
++        result = ple_gather_from_pinned(
++            ple_embedding._ple_host_table(embedding),
++            ngram_ids,
++            embedding.shard_indices.org_vocab_start_index,
++        )
++        # No-op at TP=1; completes rows owned by other ranks (their local
++        # gather is zero), matching VocabParallelEmbedding semantics.
++        tensor_model_parallel_all_reduce(result)
++    else:
++        result = ple_embedding.ngram_embedding(ngram_ids).flatten(-2)
+     output.copy_(result)
+ 
+ 
+-- 
+2.45.2
+
