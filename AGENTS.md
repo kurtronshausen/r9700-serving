@@ -145,7 +145,7 @@ auto-apply fixes.
 
 ```sh
 # Re-check watchlist status (open/closed/resolved) + any new labels:
-for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 40707 52527 52789 48815 52817 52959 51198 49125; do
+for n in 35288 47087 48375 52872 47602 51250 52520 45238 51562 51812 51837 40707 52527 52789 48815 52817 52959 51198 49125 53479 54199; do
   gh issue view $n -R vllm-project/vllm --json state,title,updatedAt 2>/dev/null \
     | jq -r '"\(.state) | \(.updatedAt) | \(.title)"'
 done
@@ -231,7 +231,14 @@ touches one of:
     `vllm:prefix_cache_hits_total` is non-zero: caching *does* hit on
     repeated-identical-prompt workloads — the failure is specific to the
     incremental shared-prefix pattern, not a global no-op. Fixes in flight:
-    `#52527` (metrics), `#48815` (MTP align retention); `#52789` (internal
+    `#52527` (metrics), `#48815` (MTP align retention), **`#53479`
+    (2026-08-25, the leading candidate — retention-aware boundary
+    materialization + removal of the speculative one-block back-off; makes the
+    store side consistent with the `#52216` retention-0 default; open, not
+    merged; interacts with our `--prefix-cache-retention-interval` pin so
+    re-validate after any bump that lands it)**, and a 2026-08-27 adaptive
+    single-checkpoint prototype (demand-driven, not yet a PR; positioned as an
+    alternative/complement to `#53479`); `#52789` (internal
     prefill checkpoints) merged 2026-08-22 but postdates the rc2 tag
     (main-only, Kimi-K3/FlashKDA-specific TTFT win, not a fix for the 0%-hit
     geometry — not worth cherry-picking). **When a real fix merges**: prefer
@@ -268,10 +275,14 @@ touches one of:
     `#52959`/`#52789`; monitor)
   - `#53488` `prompt_logprobs` silently corrupted under MTP + chunked prefill
     (Qwen3.5-family, two builds) — we don't request prompt_logprobs; monitor
-  - Main-only fixes to ride along on the next bump (checked 2026-08-24):
-    `#50729` Mamba state-copy overlap race in `vllm/v1/worker/mamba_utils.py`
-    (same-block conv/SSM shift copies were memmove-unsafe), `#53077` GDN
-    metadata reset of the spec-decode count on an empty draft schedule
+  - `#50729` Mamba state-copy overlap race in `vllm/v1/worker/mamba_utils.py`
+    (same-block conv/SSM shift copies were memmove-unsafe) — **merged
+    2026-08-17 and present in v0.28.1rc0** (verified `a02cfcc` is an ancestor
+    of the tag). `#53077` GDN metadata reset of the spec-decode count on an
+    empty draft schedule — **merged 2026-08-20 and present in v0.28.1rc0**
+    (verified `6df7adc`). Both former "main-only, ride the next bump" fixes
+    (checked 2026-08-24) are now in the current pin — no bump needed to gain
+    them.
   - `#52817` RFC: hybrid SSM + SpecDec + APC re-runs the last full block on a
     prefix hit (832 tokens here on the bf16-KV default; was 1600 on fp8),
     bounding the prefix-cache win for MTP even after `#45238` is fixed. Monitor
@@ -300,6 +311,17 @@ touches one of:
     enables that combination; asks for a default-resolution fix or at least a
     warning. Same combination we now disable via `--no-async-scheduling`;
     monitor for a merged default change.
+  - `#54199` (2026-08-28) IMA in `precopy_mamba_align_fused_kernel`
+    (`run_fused_precopy`) when a prefix-cache-hit request is admitted while
+    the donor that produced those blocks is still in flight / finishes in the
+    same scheduler step (hybrid GDN, align mode, equal attn/mamba block
+    sizes; not the `#53142` divisor mismatch). NVIDIA-only repro so far
+    (GB10 sm_121). **Monitor**: same family as `#45238`/`#53142` and reachable
+    in principle here (hybrid GDN + align + prefix cache), but gated on a
+    prefix-cache hit actually landing (`#45238` → ~0% on incremental
+    prefixes) and softened by `--max-num-seqs 2` + `--no-async-scheduling`;
+    re-check if `#45238` is fixed (hits become common) or a gfx1201/ROCm
+    repro appears.
 
 Issues known **not** to apply (checked; re-check only if the stack changes):
 NVIDIA-only (#52475, #52583 VL), non-Qwen models (#52833/#48568 GLM, #51530
@@ -356,7 +378,14 @@ TRITON_ATTN + enforce-eager; AMD confirmed R9700 TP2 working on v0.25.1; our
 TP2 stack is serving). #49851 (multimodal load failure on gfx1201 in the
 `vit_torch_sdpa_wrapper` — v0.25.1/ROCm 7.15-specific, AMD states it loads on
 v0.26.0+ with `--mm-encoder-tp-mode data`; we serve images on v0.28.0, stale
-for this stack).
+for this stack). #47194 (Qwen3.6/3.8 hybrid + prefix caching + MTP3 →
+tool-call/needle-recall corruption on the cache-hit path — this stack's exact
+config family): **resolved in our version** — the degradation is reported
+fixed in v0.28.0 by `#51113` (verified `c56f169` is in v0.28.1rc0; an
+independent 3-arm A/B/C on a Qwen3.8-27B hybrid GDN/align/fp8-KV/TP2 setup
+shows no degradation with MTP on). We're on v0.28.1rc0, so no action; the
+residual warm-rollback TTFT tax is the `#53479` performance item, not a
+correctness one.
 
 ### 4. Local patches vs upstream
 
