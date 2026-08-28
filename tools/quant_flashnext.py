@@ -121,6 +121,7 @@ def rtng128(w: torch.Tensor):
     scale = g.abs().amax(dim=2).clamp_min(1e-8) / BIAS  # [N, K/128]
     q = (torch.round(g / scale.unsqueeze(2)) + BIAS).clamp(0, 2 * BIAS)
     q8 = q.reshape(N, -1).to(torch.int32)  # [N, K]
+    # element k of row n at bits (k%8)*4 of word k//8
     words = torch.zeros(N, K // PACK, dtype=torch.int32, device=w.device)
     for i in range(PACK):
         words |= (q8[:, i::PACK] & 0xF) << (4 * i)
@@ -133,16 +134,15 @@ class ShardWriter:
         self.max_bytes = max_bytes
         self.idx = 0
         self.cur = {}
+        self.cur_bytes = 0
 
     def _path(self, i):
         return os.path.join(self.dst_dir, f"model-{i:05d}.safetensors")
 
-    def _cur_size(self):
-        return sum(t.numel() * t.element_size() for t in self.cur.values())
-
     def add(self, name, tensor):
         self.cur[name] = tensor
-        if self._cur_size() > self.max_bytes:
+        self.cur_bytes += tensor.numel() * tensor.element_size()
+        if self.cur_bytes > self.max_bytes:
             self.flush()
 
     def flush(self):
@@ -153,6 +153,7 @@ class ShardWriter:
         print(f"  wrote {os.path.basename(self._path(self.idx))}", flush=True)
         self.idx += 1
         self.cur = {}
+        self.cur_bytes = 0
 
 
 def main():
@@ -240,7 +241,7 @@ def main():
         pct = 100.0 * len(state["done_src"]) / len(src_shards)
         rate = el / len(state["done_src"])
         print(f"[{pct:5.1f}%] {shard}  ({el/60:.1f}m elapsed, "
-              f"~{rate*len(state['done_src']):.0f}s total projected)", flush=True)
+              f"~{rate * len(src_shards) / 60:.0f}m projected total)", flush=True)
 
     # Final index + config sanity.
     with open(index_path, "w") as f:
