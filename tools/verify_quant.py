@@ -60,23 +60,24 @@ def main(src_dir, dst_dir):
     assert src_other == dst_other, \
         f"passthrough mismatch: only_src={len(src_other - dst_other)} only_dst={len(dst_other - src_other)}"
 
-    # layout spot-check: first shard, a few tensors of each kind
-    shard = sorted(f for f in os.listdir(dst_dir)
-                   if f.startswith("model-") and f.endswith(".safetensors"))[0]
-    h = parse_header(os.path.join(dst_dir, shard))
+    # layout spot-check: every output shard (experts don't start until the
+    # second source shard, so shard 0 is all passthrough)
     seen = {"packed": 0, "scale": 0, "shape": 0}
-    for k, m in h.items():
-        if k == "__metadata__":
-            continue
-        if k.endswith(".weight_packed"):
-            assert m["dtype"] == "I32" and m["shape"][1] * 8 % 128 == 0
-            seen["packed"] += 1
-        elif k.endswith(".weight_scale"):
-            assert m["dtype"] == "BF16"
-            seen["scale"] += 1
-        elif k.endswith(".weight_shape"):
-            assert m["dtype"] == "I32" and m["shape"] == [2]
-            seen["shape"] += 1
+    for shard in sorted(f for f in os.listdir(dst_dir)
+                        if f.startswith("model-") and f.endswith(".safetensors")):
+        h = parse_header(os.path.join(dst_dir, shard))
+        for k, m in h.items():
+            if k == "__metadata__":
+                continue
+            if k.endswith(".weight_packed"):
+                assert m["dtype"] == "I32" and m["shape"][1] * 8 % 128 == 0
+                seen["packed"] += 1
+            elif k.endswith(".weight_scale"):
+                assert m["dtype"] == "BF16"
+                seen["scale"] += 1
+            elif k.endswith(".weight_shape"):
+                assert m["dtype"] == "I32" and m["shape"] == [2]
+                seen["shape"] += 1
     assert all(v > 0 for v in seen.values()), seen
 
     cfg = json.load(open(os.path.join(dst_dir, "config.json")))
