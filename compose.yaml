@@ -156,6 +156,7 @@ services:
       - ./chat-templates/:/app/chat-templates
       - ./fused_moe_configs/:/app/fused_moe_configs
       - ./tools/tune_fused_moe.py:/app/tune_fused_moe.py
+      - ./tools/tune_fused_moe_int4.py:/app/tune_fused_moe_int4.py
       - ./fp8_configs/:/app/fp8_configs
       - ./tools/tune_fp8_dense.py:/app/tune_fp8_dense.py
       # Overlay of protocol.py: tolerate `tools: []` + `tool_choice: "none"`

@@ -202,6 +202,27 @@ tune: check ensure-cache-dirs
         --entrypoint python vllm "$PWD/tools/run_tune.py"
     printf 'Tune complete. Run `just up` to pick up the new configs, then `just bench`.\n'
 
+# Tune the fused-MoE Triton kernel config for the Qwen3.8-Flash-Next profile
+# (int4_w4a16, expert-parallel geometry — auto-detected by run_tune.py from
+# the model's quantization_config + VLLM_EXTRA_ARGS) in a throwaway
+# container, independent of the running `vllm-qwen-flashnext` service.
+# Dense (attention-projection) tuning is out of scope here: flashnext's
+# dense layers use RDNAHybridW4A16LinearKernel, a hand-written kernel tuned
+# via a hardcoded override table in vLLM source, not a JSON config file —
+# see plan notes / Track B. Results land in ./fused_moe_configs (rw mount);
+# the next `just up-flashnext` picks them up. Faster than the fp8 MoE tune
+# (smaller shapes): budget on the order of tens of minutes across the M
+# sweep on a cold Triton cache.
+tune-flashnext: check ensure-cache-dirs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf 'Tuning flashnext fused MoE on GPU {{tune_gpu}} ...\n'
+    {{compose}} run -T --rm --no-deps \
+        -e REPO_DIR="$PWD" \
+        -e HIP_VISIBLE_DEVICES="{{tune_gpu}}" \
+        --entrypoint python vllm-qwen-flashnext "$PWD/tools/run_tune.py"
+    printf 'Tune complete. Run `just up-flashnext` to pick up the new config, then `just bench`.\n'
+
 # Ensure the selected profile's calibrated KV-scale model copy exists. Profiles
 # that want calibrated fp8 KV declare VLLM_MODEL_ID (HF source id) + VLLM_MODEL
 # (local copy path) in their env file. If the local copy's sidecar is missing,
