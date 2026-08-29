@@ -305,6 +305,29 @@ Applied by `Dockerfile.flashnext` from `patches/vllm-flashnext/*.patch` to the
   no measured regression and no tradeoff; on this stack the eager-mode
   per-token compute cost dominates decode, not this metadata builder's
   host copies.
+- **CUDA graphs without torch.compile** (`--compilation-config
+  {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}`, no patch file needed — a
+  config-only change): torch.compile itself (mode 3 / VLLM_COMPILE) still
+  crashes with a dynamo shape-specialization error on qwen4_exp's PLE layer
+  (`Ne(u1, u0)` data-dependent guard on `input_ids.shape[0] !=
+  hidden_states.shape[0]`; fixable with `torch._check`, prototyped
+  2026-08-28), and even past that guard crash, Inductor's compile/autotune
+  scratch memory OOMs on this 68 GiB/TP4 model regardless of context length,
+  cudagraph_capture_sizes, or gpu_memory_utilization (proven by three
+  isolating tests: OOM persisted with ctx cut to 16384, capture sizes
+  limited to [1,2], and cudagraph_mode=NONE) — so full compile is not
+  pursued further. CUDA graphs alone don't need torch.compile though:
+  keeping mode 0 (eager) but adding cudagraph_mode=FULL_DECODE_ONLY captures
+  prefill+decode graphs directly, cutting most of the per-op kernel-launch
+  overhead that was capping decode throughput on this hybrid GDN
+  architecture. Measured 2026-08-28 (fresh A/B, see
+  `benchmarks/2026-08-28_qwen3.8-flash-next_cudagraph_decode_only_bench.md`):
+  tg32 18.26 ± 1.90 -> 74.07 ± 5.13 tok/s (~4.0x), tg128 15.07 ± 1.79 ->
+  69.68 ± 10.59 tok/s (~4.4x); pp2048 unaffected. Needs
+  `gpu_memory_utilization` 0.95 -> 0.97 (cudagraph capture buffers need a
+  little extra headroom: at 0.95 the KV cache falls just short at full
+  155000 ctx with a graceful error, not a crash). Coherence/stability
+  verified (5x short + 1x ~1200-token generation, no crashes/OOM).
 
 ### Runtime env knobs
 
