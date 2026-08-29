@@ -258,6 +258,35 @@ v0.28.0rc2, so their patches were dropped with the bump.)
   delete Mamba's rightmost real state block). Still open upstream; carried as
   a local patch.
 
+### Flash-Next source-build patches (`patches/vllm-flashnext/`, separate image)
+
+Applied by `Dockerfile.flashnext` from `patches/vllm-flashnext/*.patch` to the
+`FLASHNEXT_VLLM_REF` tree (independent pin from the main image — see
+"Version Pins"). Re-verify when bumping `FLASHNEXT_VLLM_REF`.
+
+- **`48375-mamba-drop-eagle-block.patch`** — same fix as the main-image patch
+  above, carried separately since the flashnext pin tracks a different vLLM
+  ref.
+- **`ple-cpu-offload-rocm.patch`** — pinned-host Triton gather kernel +
+  prefetch side-stream for the qwen4_exp PLE (ngram) table, ported from
+  SGLang's design (upstream vLLM's own offload, #53899, is CUDA-only).
+  Keeps the ~99 GiB PLE table off-GPU (`VLLM_PLE_CPU_OFFLOAD=1`).
+- **MoE int4 interleave-unpack kernel**
+  (`patches/vllm-flashnext/43389-moe-int4-interleave-rocm.patch`,
+  [#43389](https://github.com/vllm-project/vllm/pull/43389), open/unmerged,
+  AMD-authored): repacks W4A16 MoE weights at load time from K-packed
+  `[E, N, K//2]` uint8 to N-packed `[E, K, N//8]` int32, unpacked in-kernel
+  via `tl.interleave` (fewer VGPRs than per-element variable shifts). Gated
+  behind `on_rdna()` + `num_bits==4`; author validated no gsm8k accuracy
+  regression on gfx1100/gfx1151/gfx1201 (our arch). Measured on this stack
+  (see `benchmarks/2026-08-28_qwen3.8-flash-next_43389_moe_patch_bench.md`):
+  pp2048 ~3x (700-780 -> 2344-2346 t/s), tg32/tg128 unchanged within noise.
+  Tradeoff: ~3.5-4 GiB more peak activation memory during the profiling
+  pass, cutting usable ctx @ util 0.95 from 262144 to ~158304
+  (`VLLM_MAX_MODEL_LEN` on `env/qwen3.8-flash-next-aixiaoma.env` cut to
+  155000 accordingly). Revert + drop this patch if full 256K context matters
+  more than the pp2048 win; watch upstream #43389 for merge.
+
 ### Runtime env knobs
 
 Non-standard environment set across `compose.yaml`, `Dockerfile.fullbuild`,
