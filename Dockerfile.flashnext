@@ -6,12 +6,14 @@
 #     qwen4_exp) instead of VLLM_REF, so only the vLLM + runtime stages
 #     diverge from the main build's layer cache; framework-base /
 #     flash-attention / aiter stay byte-identical and hit the shared cache.
-#  2. patches/vllm-flashnext/ (PLE CPU offload + 48375 Mamba/MTP fix) is
-#     applied to the INSTALLED tree in the runtime stage — the last heavy
-#     layer — instead of to the source before compilation. The patches are
-#     pure-Python, so a patch edit re-runs only a ~1s layer (no vLLM wheel
-#     recompile). Constraint: C++/Rust/CMake patches must instead be applied
-#     in the vllm-builder stage, before bdist_wheel (see the NOTE there).
+#  2. patches/vllm-flashnext/ (PLE CPU offload + 48375 Mamba/MTP fix +
+#     43389 MoE int4 interleave kernel + 53899 short-conv pinned-host
+#     staging) is applied to the INSTALLED tree in the runtime stage — the
+#     last heavy layer — instead of to the source before compilation. The
+#     patches are pure-Python, so a patch edit re-runs only a ~1s layer (no
+#     vLLM wheel recompile). Constraint: C++/Rust/CMake patches must
+#     instead be applied in the vllm-builder stage, before bdist_wheel
+#     (see the NOTE there).
 
 ARG ROCM_IMAGE
 ARG GPU_ARCH=gfx1201

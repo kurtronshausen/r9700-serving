@@ -286,6 +286,25 @@ Applied by `Dockerfile.flashnext` from `patches/vllm-flashnext/*.patch` to the
   (`VLLM_MAX_MODEL_LEN` on `env/qwen3.8-flash-next-aixiaoma.env` cut to
   155000 accordingly). Revert + drop this patch if full 256K context matters
   more than the pp2048 win; watch upstream #43389 for merge.
+- **Pinned host-staging for short-conv attn metadata**
+  (`patches/vllm-flashnext/53899-short-conv-async-h2d-rocm.patch`, sourced
+  from a [#53899](https://github.com/vllm-project/vllm/pull/53899) review
+  comment — that PR itself is CUDA-only PLE offload, unrelated; this fix is
+  orthogonal): routes 5 CPU->GPU req-idx copies in
+  `PleShortConvAttentionMetadataBuilder.build` through `async_tensor_h2d`
+  (pins the host tensor first) instead of a plain `.to(device)`, since each
+  copy originates from a fresh `.nonzero()` result (pageable host memory).
+  Reported upstream on 2x MI210 (gfx90a): took the profiled worker step
+  from 33.2ms to 5.1ms. Applies regardless of `VLLM_PLE_CPU_OFFLOAD` vs
+  `VLLM_PLE_MMAP`. Measured on this stack (qwen3.8-flash-next-aixiaoma,
+  TP4, eager mode, MTP4, `llama-benchy` pp2048/tg32+128, 3 runs): tg32
+  17.12 ± 2.78 vs the #43389-patch baseline's 16.95-17.88, tg128 14.67 ±
+  1.28 vs 15.52-16.07 — within run-to-run noise, no measurable win on
+  gfx1201/RDNA4 (unlike the MI210 report). Kept anyway: it's a strict
+  correctness/perf fix (removes a synchronous pageable-memory copy) with
+  no measured regression and no tradeoff; on this stack the eager-mode
+  per-token compute cost dominates decode, not this metadata builder's
+  host copies.
 
 ### Runtime env knobs
 

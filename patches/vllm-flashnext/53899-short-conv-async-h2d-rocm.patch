@@ -1,0 +1,101 @@
+From 2334ec2958b9b66929ddc6f5e9995bf15708cde8 Mon Sep 17 00:00:00 2001
+From: OpenCode <opencode@localhost>
+Date: Fri, 28 Aug 2026 20:50:14 -0700
+Subject: [PATCH] [Perf][ROCm] Pin host staging for short-conv attn metadata
+ req-idx gathers
+
+Adapted for FLASHNEXT_VLLM_REF=2a4cd640 (vllm#53896 head). Sourced from a
+review comment on upstream PR vllm-project/vllm#53899 (open, unmerged --
+that PR is the CUDA-only PLE offload path; this fix is orthogonal and
+applies regardless of PLE offload mode). Verified `git apply --check`
+clean on the 2a4cd640 tree's `PleShortConvAttentionMetadataBuilder.build`
+(vllm/v1/attention/backends/short_conv_attn.py).
+
+Route the 5 CPU->GPU req-idx tensor copies in
+PleShortConvAttentionMetadataBuilder.build through async_tensor_h2d
+(pin_memory + non_blocking=True) instead of a plain .to(device). Each
+of these copies (spec_req_idx, non_spec_req_idx, the decode req_group
+scatter index, the spec_req_idx accepted-token gather index, and the
+non-spec num_computed_tokens gather index) originates from a fresh
+.nonzero() result -- freshly-allocated pageable host memory -- so the
+plain .to(device) call is a synchronous copy that pays a full host
+page-lock on every single decode step.
+
+Reported upstream (vllm-project/vllm#53899, PR review comment) on
+2x MI210 (gfx90a): routing these 5 sites through async_tensor_h2d
+(already imported and used elsewhere in this file) took the profiled
+worker step from 33.2ms to 5.1ms. Same call pattern is present
+unmodified in this PLE ShortConv attention metadata builder regardless
+of whether VLLM_PLE_CPU_OFFLOAD or VLLM_PLE_MMAP is used, so it
+applies to our production CPU_OFFLOAD path too.
+
+Measured on qwen3.8-flash-next-aixiaoma (TP4, bf16 KV, MTP4, util
+0.95, eager mode) via llama-benchy (pp2048/tg32+128, 3 runs): tg32
+17.12 +/- 2.78 tok/s vs the #43389-patch baseline's 16.95-17.88,
+tg128 14.67 +/- 1.28 vs 15.52-16.07 -- within run-to-run noise, no
+measurable win on gfx1201/RDNA4 (the MI210 report's 33.2ms->5.1ms
+worker-step gain does not translate to a visible end-to-end tok/s
+change here; eager-mode per-token compute cost dominates decode on
+this stack, not this metadata builder's host copies). Kept anyway:
+it is a strict correctness/perf fix with zero measured regression
+and no tradeoff, and it removes a real synchronous-copy anti-pattern
+regardless of whether it is the local bottleneck.
+---
+ vllm/v1/attention/backends/short_conv_attn.py | 20 ++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/vllm/v1/attention/backends/short_conv_attn.py b/vllm/v1/attention/backends/short_conv_attn.py
+index 3e888e69b..2f00de8cf 100644
+--- a/vllm/v1/attention/backends/short_conv_attn.py
++++ b/vllm/v1/attention/backends/short_conv_attn.py
+@@ -330,8 +330,14 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
+         decode_req_idx_cpu = decode_mask_cpu.nonzero(as_tuple=True)[0]
+         prefill_req_idx_cpu = prefill_mask_cpu.nonzero(as_tuple=True)[0]
+         non_spec_req_idx_cpu = torch.cat((decode_req_idx_cpu, prefill_req_idx_cpu))
+-        spec_req_idx = spec_req_idx_cpu.to(query_start_loc.device)
+-        non_spec_req_idx = non_spec_req_idx_cpu.to(query_start_loc.device)
++        # async_tensor_h2d pins the host tensor before the copy; a plain
++        # .to(device) here would copy from a freshly-allocated pageable
++        # page every step, which on ROCm costs ~290x a pinned copy (the
++        # per-page host lock dominates, not the transfer size).
++        spec_req_idx = async_tensor_h2d(spec_req_idx_cpu, query_start_loc.device)
++        non_spec_req_idx = async_tensor_h2d(
++            non_spec_req_idx_cpu, query_start_loc.device
++        )
+ 
+         if num_decodes == 0 and num_prefills == 0:
+             # Pure speculative-decode batch: all real tokens are spec tokens.
+@@ -361,7 +367,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
+                 device=query_start_loc.device,
+             )
+             req_group[spec_req_idx] = 0
+-            req_group[decode_req_idx_cpu.to(query_start_loc.device)] = 1
++            req_group[
++                async_tensor_h2d(decode_req_idx_cpu, query_start_loc.device)
++            ] = 1
+             token_group = torch.repeat_interleave(req_group, query_lens)
+             token_perm = torch.argsort(token_group, stable=True)
+             spec_token_indx = token_perm[:num_spec_decode_tokens]
+@@ -398,7 +406,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
+         # Accepted-token counts must follow the same request order as the
+         # speculative state indices.
+         num_accepted_tokens = num_accepted_tokens[
+-            spec_req_idx_cpu.to(num_accepted_tokens.device)
++            async_tensor_h2d(spec_req_idx_cpu, num_accepted_tokens.device)
+         ]
+ 
+         # Compute the conv-state slots for the non-spec decode/prefill split,
+@@ -417,7 +425,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
+         if num_decodes > 0 or num_prefills > 0:
+             num_computed_tokens = m.compute_num_computed_tokens()
+             if non_spec_req_idx_cpu is not None:
+-                non_spec_req_idx = non_spec_req_idx_cpu.to(num_computed_tokens.device)
++                non_spec_req_idx = async_tensor_h2d(
++                    non_spec_req_idx_cpu, num_computed_tokens.device
++                )
+                 num_computed_tokens = num_computed_tokens[non_spec_req_idx]
+ 
+             state_indices_tensor_d = state_indices_tensor[:num_decodes]
+-- 
+2.45.2
+
