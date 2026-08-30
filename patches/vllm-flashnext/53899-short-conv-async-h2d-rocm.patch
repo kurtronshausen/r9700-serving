@@ -4,7 +4,8 @@ Date: Fri, 28 Aug 2026 20:50:14 -0700
 Subject: [PATCH] [Perf][ROCm] Pin host staging for short-conv attn metadata
  req-idx gathers
 
-Adapted for FLASHNEXT_VLLM_REF=2a4cd640 (vllm#53896 head). Sourced from a
+Adapted for FLASHNEXT_VLLM_REF=2a4cd640, re-verified clean (no changes
+needed) against fb97542c (vllm#53896 head, 2026-08-30). Sourced from a
 review comment on upstream PR vllm-project/vllm#53899 (open, unmerged --
 that PR is the CUDA-only PLE offload path; this fix is orthogonal and
 applies regardless of PLE offload mode). Verified `git apply --check`

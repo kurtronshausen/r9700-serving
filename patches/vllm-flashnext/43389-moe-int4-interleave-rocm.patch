@@ -4,7 +4,8 @@ Date: Fri, 28 Aug 2026 18:53:34 -0700
 Subject: [PATCH] [Perf][ROCm] MoE int4 interleave unpacking for GPTQ/AWQ
  Triton kernel (#43389)
 
-Adapted for FLASHNEXT_VLLM_REF=2a4cd640 (vllm#53896 head). Upstream PR #43389
+Adapted for FLASHNEXT_VLLM_REF=2a4cd640, re-verified clean (no changes
+needed) against fb97542c (vllm#53896 head, 2026-08-30). Upstream PR #43389
 (open, under review as of 2026-08-28) against vllm main; verified
 git apply --check clean on the 2a4cd640 tree (core vllm/ files only --
 tests/kernels/moe/test_moe.py and benchmarks/kernels/benchmark_moe.py are

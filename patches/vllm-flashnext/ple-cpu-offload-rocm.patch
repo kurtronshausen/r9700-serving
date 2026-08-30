@@ -20,17 +20,23 @@ behavior unchanged).
 - Uses no CUDA IPC / driver stream semantics, so the CUDA-only
   reference offload does not apply; this is a standalone AMD path.
 
-Base: vllm PR #53896 head 2a4cd640. Verified: git apply --check clean
-on pristine 2a4cd640; CPU emulation test of the mapping/all-reduce
-invariant passed; runtime-verified on the tiny profile (v1 freed the
-GPU copy at first forward; v2 removes that allocation entirely).
+Rebased for FLASHNEXT_VLLM_REF=fb97542ccca9404d3bd573810e1c6b794115a1d4
+(2026-08-30 head, up from the prior 2a4cd640 pin). Upstream's
+`21505cd6f`/`37c7110fa` (PLE NGram helper cleanup) moved the module-level
+`_splitmix64`/`_is_prime_64`/`_nth_prime_after` hash helpers into
+classmethods on `Qwen4ExpNGramEmbedding` and renamed the local
+`offset` accumulator to `total_vocab_size` in `__init__` -- purely
+mechanical, no behavior change. Reconciled both hunks by hand;
+functional diff is otherwise unchanged from the 2a4cd640 version.
+Verified: git apply --check clean on the fb97542c tree; `python -c
+"import ast; ast.parse(...)"` on the patched ple_layer.py.
 ---
  vllm/envs.py                           |   6 +
  vllm/models/qwen4_exp/amd/ple_layer.py | 158 ++++++++++++++++++++++++-
  2 files changed, 162 insertions(+), 2 deletions(-)
 
 diff --git a/vllm/envs.py b/vllm/envs.py
-index a24debdeb..7544da92d 100755
+index 6abcb4498..08dce6216 100755
 --- a/vllm/envs.py
 +++ b/vllm/envs.py
 @@ -138,6 +138,7 @@ if TYPE_CHECKING:
@@ -54,7 +60,7 @@ index a24debdeb..7544da92d 100755
      # interleaved flydsl kernels instead of the default a16w4 separated path.
      # This is the only flag users need: vLLM picks the kernels by passing
 diff --git a/vllm/models/qwen4_exp/amd/ple_layer.py b/vllm/models/qwen4_exp/amd/ple_layer.py
-index a1a600c9c..947891f9d 100644
+index 668b4931a..760a514df 100644
 --- a/vllm/models/qwen4_exp/amd/ple_layer.py
 +++ b/vllm/models/qwen4_exp/amd/ple_layer.py
 @@ -9,7 +9,9 @@ import torch
@@ -75,8 +81,8 @@ index a1a600c9c..947891f9d 100644
  from vllm.utils.torch_utils import direct_register_custom_op
  from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
  from vllm.v1.attention.backends.short_conv_attn import (
-@@ -90,6 +93,84 @@ def _nth_prime_after(start: int, count: int) -> int:
-     return prime
+@@ -36,6 +39,84 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+ from ..common.ple import copy_ple_embedding_shard_
  
  
 +@triton.jit
@@ -160,10 +166,10 @@ index a1a600c9c..947891f9d 100644
  class Qwen4ExpPLEGroupedNorm(nn.Module):
      def __init__(
          self,
-@@ -192,12 +273,26 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+@@ -227,12 +308,26 @@ class Qwen4ExpNGramEmbedding(nn.Module):
          )
          divisor = int(config.make_ngram_vocab_size_divisible_by)
-         padded_vocab_size = ((offset + divisor - 1) // divisor) * divisor
+         padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
 +        self.ple_offload = envs.VLLM_PLE_CPU_OFFLOAD
          self.ngram_embedding = VocabParallelEmbedding(
              padded_vocab_size,
@@ -187,7 +193,7 @@ index a1a600c9c..947891f9d 100644
          self.register_buffer(
              "positions_buffer",
              torch.arange(max_total_tokens, dtype=torch.int64),
-@@ -213,6 +308,35 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+@@ -248,6 +343,35 @@ class Qwen4ExpNGramEmbedding(nn.Module):
              persistent=False,
          )
  
@@ -223,7 +229,7 @@ index a1a600c9c..947891f9d 100644
      @staticmethod
      def _shift_precompute(
          tokens: torch.Tensor, eos_token_id: int
-@@ -268,6 +392,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+@@ -303,6 +427,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                  f"PLE received {num_reqs} requests, but its workspace supports "
                  f"at most {self.padded_buffer.shape[0]}"
              )
@@ -235,7 +241,7 @@ index a1a600c9c..947891f9d 100644
  
          positions = self.positions_buffer[:num_tokens]
          packed = self.padded_buffer[:num_reqs]
-@@ -376,8 +505,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+@@ -411,8 +540,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                          f"expected {expected_shape}, got "
                          f"{tuple(loaded_weight.shape)}"
                      )
@@ -250,7 +256,7 @@ index a1a600c9c..947891f9d 100644
                      loaded_weight,
                      checkpoint_start=checkpoint_start,
                      tp_start=embedding.shard_indices.org_vocab_start_index,
-@@ -385,6 +519,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
+@@ -420,6 +554,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                  )
                  loaded.add("ngram_embedding.weight")
                  continue
@@ -263,7 +269,7 @@ index a1a600c9c..947891f9d 100644
              regular_weights.append((name, loaded_weight))
  
          if regular_weights:
-@@ -1045,11 +1185,25 @@ def qwen4_exp_amd_ple_ngram_embedding(
+@@ -1079,11 +1219,25 @@ def qwen4_exp_amd_ple_ngram_embedding(
  
      Keeping the embedding weight in ``static_forward_context`` prevents AOT
      compile-time autotuning from materializing a synthetic copy of the weight.

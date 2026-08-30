@@ -3,7 +3,8 @@ From: OpenCode <opencode@localhost>
 Date: Wed, 19 Aug 2026 09:00:00 +0000
 Subject: [PATCH] [BugFix] Honor drop_eagle_block in MambaManager (#48375)
 
-Adapted for FLASHNEXT_VLLM_REF=2a4cd640 (vllm#53896 head). Upstream PR #48375
+Adapted for FLASHNEXT_VLLM_REF=2a4cd640, re-verified clean (no changes
+needed) against fb97542c (vllm#53896 head, 2026-08-30). Upstream PR #48375
 (still open upstream as of 2026-08-27) against vllm main; verified
 `git apply --check` clean on the 2a4cd640 tree's
 `MambaManager.find_longest_cache_hit`
