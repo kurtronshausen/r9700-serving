@@ -201,9 +201,15 @@ services:
   #
   # Not intended to run concurrently with `vllm`/`vllm-qwen-flashnext` (per
   # user confirmation) — no non-overlapping GPU partitioning is applied here.
-  # RADIANCE_TP starts at 2 (the only configuration upstream has tested);
-  # bumping to 4 is an explicit follow-up needing its own validation (see
-  # plan.md "Phase 2 — TP=4 stretch goal").
+  # RADIANCE_TP defaults to 4 (all 4 GPUs) — validated 2026-08-30: 4/4 ranks
+  # healthy, P2P enabled on all 6 pairs, R4D_AR engaged with no fallback,
+  # coherent (single/4-concurrent/vision), and strictly faster than TP=2
+  # across the board (pp2048 ~4388 vs ~3986-4000, tg32 104.46±14.99 vs
+  # 81.49±7.20, tg128 99.07±3.07 vs 89.64±14.84 — see
+  # benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md for the TP=2
+  # baseline this beat). Upstream's own docs only claim TP=2 as tested, so
+  # revert to `RADIANCE_TP=2`/`RADIANCE_HIP_VISIBLE_DEVICES=0,1` in `.env` if
+  # a future image bump regresses this.
   #
   # Unlike `vllm`/`vllm-qwen-flashnext`, this image's ENTRYPOINT is its own
   # `radiance_entrypoint.sh` (banner + prechecks, then `exec vllm serve
@@ -229,7 +235,7 @@ services:
       - /srv/llm/Qwen/Qwen3.8-27B-FP8/snapshots/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
       - --served-model-name=qwen3.8-27b-radiance
       - --quantization=fp8
-      - --tensor-parallel-size=${RADIANCE_TP:-2}
+      - --tensor-parallel-size=${RADIANCE_TP:-4}
       - --max-num-seqs=${RADIANCE_MAX_NUM_SEQS:-8}
       - --max-model-len=${RADIANCE_MAX_MODEL_LEN:-200000}
       - --gpu-memory-utilization=${RADIANCE_GPU_UTIL:-0.90}
@@ -274,8 +280,8 @@ services:
       - HOME=${HOME}
       # GPU visibility: HIP index only, never CUDA_VISIBLE_DEVICES. Widen to
       # 0,1,2,3 for the TP=4 stretch goal (plan.md Phase 2).
-      - HIP_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1}
-      - ROCR_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1}
+      - HIP_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - ROCR_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1,2,3}
       # AITER: unified attention ON, every other AITER path OFF (per
       # upstream's own reference compose: "LINEAR=1 crashes on gfx1201").
       - VLLM_ROCM_USE_AITER=1
