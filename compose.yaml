@@ -240,7 +240,7 @@ services:
       # scale of 1.0). bf16 roughly doubles KV bytes/token vs fp8 — re-derive
       # RADIANCE_MAX_NUM_BATCHED_TOKENS/KV headroom after first boot rather
       # than assuming radiance's fp8-tuned defaults carry over.
-      - --kv-cache-dtype=bf16
+      - --kv-cache-dtype=bfloat16
       # R4D: radiance's hand-written gfx1201 kernels (the headline feature).
       # Requires head_dim 256 / 6 query-heads-per-KV-head / paged block 16 /
       # causal decoder attention / bf16-or-fp8 KV — all satisfied here.
