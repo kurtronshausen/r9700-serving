@@ -261,7 +261,12 @@ services:
       # Reuse this repo's own vetted froggeric template (not radiance's
       # qwen3.8-enhanced.jinja) — see plan.md open items; can A/B later.
       - --chat-template=/app/chat-templates/qwen.jinja
-      - --language-model-only
+      # Vision ON (not --language-model-only): matches the main vllm
+      # service's convention for this same VL checkpoint. image cap of 1
+      # (not the vLLM default) — 2+ large images in one hybrid-Mamba prompt
+      # deadlocks the engine (vllm-project/vllm#40707, unfixed, #40709 not
+      # merged). Raise only if that lands upstream.
+      - '--limit-mm-per-prompt={"image":1,"audio":0,"video":0}'
       - --trust-remote-code
       - --host=0.0.0.0
       - --port=8000
