@@ -261,6 +261,15 @@ services:
       # Required with disable_padded_drafter_batch (vLLM would otherwise
       # auto-enable async scheduling then disable it with a runtime warning).
       - --no-async-scheduling
+      # 2026-08-30: reasoning-loop investigation. Same loop symptom
+      # reproduced on flashnext (unrelated vLLM build) and even in a fresh
+      # client session — ruling out a version-specific bug or session
+      # poisoning, pointing at a decoding-time cause. This service ran with
+      # NO --override-generation-config at all (deferring entirely to
+      # whatever the client requests); a community 4xR9700 Flash-Next build
+      # (tcclaviger/vllm:DevQwenNextFlash) runs presence_penalty=1 with no
+      # reported loop. Testing the same value here.
+      - '--override-generation-config={"presence_penalty":1.0}'
       - --enable-auto-tool-choice
       - --tool-call-parser=qwen3_coder
       - --reasoning-parser=qwen3

@@ -34,6 +34,21 @@
 # Only takes effect on vLLM v0.28.1rc0+ (#52216 introduced the flag); a no-op
 # on older builds. Restores dense Mamba retention that rc0's sparse default
 # would otherwise drop under MTP (vllm-project/vllm#53504).
+#
+# VLLM_PRESENCE_PENALTY (default 0.0, matching the prior hardcoded value —
+# opt in per-profile): a community 4xR9700 Qwen3.8-Flash-Next build
+# (reddit.com/r/LocalLLaMA, tcclaviger/vllm:DevQwenNextFlash) runs
+# presence_penalty=1 and reports no reasoning-loop symptom. Our own
+# --override-generation-config previously hardcoded presence_penalty=0.0,
+# which forcibly neutralizes any anti-repetition signal from the client
+# regardless of what it requests — greedy/low-temperature agentic client
+# sampling plus this override is a textbook repetition-loop setup (2026-08-30
+# root-cause investigation: the same reasoning-loop symptom reproduced on
+# BOTH flashnext and vllm-radiance, two structurally unrelated vLLM builds,
+# and even in a fresh client session — ruling out a version-specific vLLM
+# bug or session-context poisoning, and pointing at a decoding-time cause
+# common to both). Set per-profile via env/<profile>.env, not globally, until
+# proven to fix the symptom without a quality regression.
 
 set -eu
 
@@ -59,7 +74,7 @@ exec vllm serve \
     --max-num-batched-tokens "${VLLM_MAX_BATCHED_TOKENS:-8192}" \
     --enable-prefix-caching \
     --enable-prompt-tokens-details \
-    --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0}' \
+    --override-generation-config "{\"temperature\": 1.0, \"top_p\": 0.95, \"top_k\": 20, \"min_p\": 0.0, \"presence_penalty\": ${VLLM_PRESENCE_PENALTY:-0.0}, \"repetition_penalty\": 1.0}" \
     --gpu-memory-utilization "${VLLM_GPU_MEM_UTIL:-0.95}" \
     --host 0.0.0.0 \
     --port 8000 \
