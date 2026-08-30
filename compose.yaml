@@ -189,3 +189,134 @@ services:
       timeout: 5s
       retries: 3
       start_period: 900s
+
+  # Third, standalone vLLM server: the prebuilt `stilldeadcode/vllm-radiance`
+  # image (Docker Hub, NOT built by this repo) serving Qwen3.8-27B-FP8. This
+  # image bundles its own from-source ROCm/PyTorch/AITER/vLLM stack plus
+  # hand-written gfx1201 kernels (R4D: paged attention, gated-delta-net
+  # prefill scan, P2P all-reduce, skinny bf16 GEMM) purpose-built for exactly
+  # this model's geometry (head_dim 256, 6 query heads per KV head). Not a
+  # fit for Flash-Next (wrong vLLM version/quant/shape for it) — see
+  # plan.md's 2026-08-30 feasibility notes.
+  #
+  # Not intended to run concurrently with `vllm`/`vllm-qwen-flashnext` (per
+  # user confirmation) — no non-overlapping GPU partitioning is applied here.
+  # RADIANCE_TP starts at 2 (the only configuration upstream has tested);
+  # bumping to 4 is an explicit follow-up needing its own validation (see
+  # plan.md "Phase 2 — TP=4 stretch goal").
+  #
+  # Unlike `vllm`/`vllm-qwen-flashnext`, this image's ENTRYPOINT is its own
+  # `radiance_entrypoint.sh` (banner + prechecks, then `exec vllm serve
+  # "$@"`) — args come from `command:` below, not our entrypoint.sh's
+  # env-var-assembly convention, so this service intentionally does NOT use
+  # an `env/${MODEL_PROFILE}.env`-style profile file.
+  vllm-radiance:
+    <<: *amd_devices
+    image: docker.io/stilldeadcode/vllm-radiance:${RADIANCE_VLLM_RADIANCE_TAG:-0.9.3}
+    container_name: vllm-radiance
+    restart: unless-stopped
+    ports:
+      - "${RADIANCE_PORT:-8002}:8000"
+    networks:
+      default:
+        aliases:
+          - llm-radiance-backend
+    command:
+      # HF-hub-cache-style layout (blobs/refs/snapshots), not a flat dir —
+      # this is the snapshot `refs/main` currently points to. Re-check
+      # `cat /srv/llm/Qwen/Qwen3.8-27B-FP8/refs/main` after any re-sync/
+      # re-download of this model and update the hash below if it changed.
+      - /srv/llm/Qwen/Qwen3.8-27B-FP8/snapshots/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+      - --served-model-name=qwen3.8-27b-radiance
+      - --quantization=fp8
+      - --tensor-parallel-size=${RADIANCE_TP:-2}
+      - --max-num-seqs=${RADIANCE_MAX_NUM_SEQS:-8}
+      - --max-model-len=${RADIANCE_MAX_MODEL_LEN:-200000}
+      - --gpu-memory-utilization=${RADIANCE_GPU_UTIL:-0.90}
+      - --max-num-batched-tokens=${RADIANCE_MAX_NUM_BATCHED_TOKENS:-4096}
+      # bf16 KV (not radiance's own fp8-KV reference default): matches this
+      # repo's main qwen3.8-27b profile, since the stock FP8 checkpoint ships
+      # no calibrated KV scales (fp8 KV would serve at an uncalibrated
+      # scale of 1.0). bf16 roughly doubles KV bytes/token vs fp8 — re-derive
+      # RADIANCE_MAX_NUM_BATCHED_TOKENS/KV headroom after first boot rather
+      # than assuming radiance's fp8-tuned defaults carry over.
+      - --kv-cache-dtype=bf16
+      # R4D: radiance's hand-written gfx1201 kernels (the headline feature).
+      # Requires head_dim 256 / 6 query-heads-per-KV-head / paged block 16 /
+      # causal decoder attention / bf16-or-fp8 KV — all satisfied here.
+      - --attention-backend=R4D
+      # Hybrid GDN model: both flags are required or vLLM silently disables
+      # prefix caching (hybrid models default their APC support flag off).
+      - --enable-prefix-caching
+      - --mamba-cache-mode=align
+      # MTP self-speculation (head is in the checkpoint, no separate
+      # drafter). Give the drafter the same R4D backend as the target.
+      - '--speculative-config={"method":"mtp","num_speculative_tokens":${RADIANCE_MTP_NSPEC:-8},"attention_backend":"R4D","disable_padded_drafter_batch":true}'
+      # Required with disable_padded_drafter_batch (vLLM would otherwise
+      # auto-enable async scheduling then disable it with a runtime warning).
+      - --no-async-scheduling
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      - --reasoning-parser=qwen3
+      # Reuse this repo's own vetted froggeric template (not radiance's
+      # qwen3.8-enhanced.jinja) — see plan.md open items; can A/B later.
+      - --chat-template=/app/chat-templates/qwen.jinja
+      - --language-model-only
+      - --trust-remote-code
+      - --host=0.0.0.0
+      - --port=8000
+    environment:
+      - HOME=${HOME}
+      # GPU visibility: HIP index only, never CUDA_VISIBLE_DEVICES. Widen to
+      # 0,1,2,3 for the TP=4 stretch goal (plan.md Phase 2).
+      - HIP_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1}
+      - ROCR_VISIBLE_DEVICES=${RADIANCE_HIP_VISIBLE_DEVICES:-0,1}
+      # AITER: unified attention ON, every other AITER path OFF (per
+      # upstream's own reference compose: "LINEAR=1 crashes on gfx1201").
+      - VLLM_ROCM_USE_AITER=1
+      - VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
+      - VLLM_ROCM_USE_AITER_MHA=0
+      - VLLM_ROCM_USE_AITER_MLA=0
+      - VLLM_ROCM_USE_AITER_MOE=0
+      - VLLM_ROCM_USE_AITER_LINEAR=0
+      - VLLM_ROCM_USE_AITER_FP8BMM=0
+      - VLLM_ROCM_USE_AITER_FP4BMM=0
+      - VLLM_ROCM_USE_AITER_RMSNORM=0
+      # Master switch + individual R4D kernel toggles (all baked ON in the
+      # image; explicit here for visibility/overridability). R4D_AR (the P2P
+      # all-reduce) is documented as built/tested for TP=2 specifically —
+      # watch the startup banner's kernel-resolution lines when moving to
+      # TP=4, it may silently fall back to RCCL.
+      - RADIANCE_USE_R4D=${RADIANCE_USE_R4D:-1}
+      - RADIANCE_USE_R4D_AR=${RADIANCE_USE_R4D_AR:-1}
+      - RADIANCE_USE_R4D_AR_QUANT=1
+      - RADIANCE_FUSE_RMS_QUANT=1
+      - RADIANCE_DYNAMIC_DRAFT=1
+      - RADIANCE_DRAFT_SCHEDULE=${RADIANCE_DRAFT_SCHEDULE:-1:8,2:7,4:6,8:5,16:4}
+      - RADIANCE_DRAFT_TAU=${RADIANCE_DRAFT_TAU:-0.28}
+      - RADIANCE_FAST_DRAFT=${RADIANCE_FAST_DRAFT:-1}
+      - NCCL_PROTO=Simple
+      - TORCHINDUCTOR_COMPILE_THREADS=4
+      # Per-container compile caches (own suffix, mirrors the `_flashnext`
+      # convention) so this image's from-scratch JIT/inductor cache never
+      # shares mutable state with the other two services.
+      - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_radiance
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_radiance
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_radiance
+      - AITER_ROOT_DIR=${HOME}/.cache/aiter_radiance
+      - TRITON_CACHE_AUTOTUNING=1
+    volumes:
+      - ./chat-templates/:/app/chat-templates
+      - ${HOME}:${HOME}
+      - ${HOME}/.vllm-workspace:/workspace
+      # Local checkpoints (the model dir referenced in `command:` above).
+      - /srv/llm:/srv/llm
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 60
+      # Generous: brand-new image, from-scratch JIT/inductor cache on first
+      # boot (upstream: "a few extra minutes compiling Triton / inductor
+      # kernels before the engine comes up").
+      start_period: 1800s

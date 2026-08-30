@@ -59,7 +59,7 @@ check:
         fi
     done
     {{compose}} config --quiet
-    printf 'Config OK (model: %s, flashnext: %s).\n' \
+    printf 'Config OK (model: %s, flashnext: %s, radiance: qwen3.8-27b-radiance).\n' \
         "$(grep -m1 '^VLLM_MODEL=' "env/{{model}}.env" | cut -d= -f2-)" \
         "$(grep -m1 '^VLLM_MODEL=' "env/qwen3.8-flash-next.env" | cut -d= -f2-)"
 
@@ -109,6 +109,11 @@ clear-vllm-caches:
         "$HOME/.cache/triton_flashnext"
         "$HOME/.cache/torchinductor_flashnext"
         "$HOME/.cache/tilelang_flashnext"
+        # vllm-radiance service's per-container compile caches
+        "$HOME/.cache/vllm_radiance"
+        "$HOME/.cache/triton_radiance"
+        "$HOME/.cache/torchinductor_radiance"
+        "$HOME/.cache/aiter_radiance"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -312,6 +317,27 @@ up-flashnext: check ensure-cache-dirs
     {{compose}} up -d vllm-qwen-flashnext
     printf 'vllm-qwen-flashnext starting at http://localhost:%s/v1 (large model —\n' "$flashnext_port"
     printf 'check readiness with `just logs vllm-qwen-flashnext` or `just compose ps`).\n'
+
+# Start the vllm-radiance service (Qwen3.8-27B-FP8 via the prebuilt
+# stilldeadcode/vllm-radiance image — no build step, just `docker pull`).
+# Not intended to run concurrently with `vllm`/`vllm-qwen-flashnext` — no
+# GPU partitioning is applied by default (RADIANCE_HIP_VISIBLE_DEVICES
+# defaults to 0,1 for the TP=2 bring-up phase; see plan.md).
+up-radiance: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    radiance_port="$(grep -m1 '^RADIANCE_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    radiance_port="${radiance_port:-8002}"
+    {{compose}} up -d vllm-radiance
+    printf 'vllm-radiance starting at http://localhost:%s/v1 (fresh image —\n' "$radiance_port"
+    printf 'first boot compiles Triton/inductor kernels, can take several\n'
+    printf 'minutes; check readiness with `just logs vllm-radiance` or\n'
+    printf '`just compose ps`).\n'
+
+# Stop just the vllm-radiance service (leaves `vllm`/`vllm-qwen-flashnext`
+# running if they are up).
+down-radiance:
+    @{{compose}} down vllm-radiance
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:
