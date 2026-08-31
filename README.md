@@ -2,8 +2,13 @@
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
 configuration targets four R9700s (`gfx1201`) and serves a model through
-vLLM's OpenAI-compatible API, with an optional second, concurrent container
-for a vision-language profile (see [Multiple containers](#multiple-containers)).
+vLLM's OpenAI-compatible API. `compose.yaml` defines three independent
+services — `vllm` (dense Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
+(Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
+and `vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
+community image) — each with its own port, model profile, and compile-cache
+dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to
+pick one and why they aren't meant to run together).
 
 ## Requirements
 
@@ -32,15 +37,21 @@ commands below run from inside that directory.)
 
 ```sh
 cp .env.example .env  # Build version pins + default model profile (untracked)
-just build       # Build localhost/vllm-fullbuild:latest
+just build       # Build localhost/vllm-fullbuild:latest (the `vllm` service image)
 just check       # Validate the compose config for the selected profiles
-just up          # Start both containers in the background (default: Qwen3.8-27B-FP8 + Qwen2.5-VL-72B vision)
-just --set model qwen3.6-27b up     # Switch the main container to Qwen3.6-27B-FP8 (dense)
-just --set model qwen3.6-35b-a3b up  # Switch the main container to the MoE 35B-A3B model
-just --set vision_model qwen2.5-vl-72b-instruct up  # Switch the vision container's profile
-just logs        # Follow service logs (`just logs vllm-vision` for one)
-just down        # Stop and remove containers
+just up          # Start the main `vllm` service (default: Qwen3.8-27B-FP8, port 8000)
+just --set model qwen3.6-27b up     # Switch to Qwen3.6-27B-FP8 (dense)
+just --set model qwen3.6-35b-a3b up  # Switch to the MoE 35B-A3B model
+just logs        # Follow the `vllm` service's logs
+just down        # Stop and remove the `vllm` service's containers
 ```
+
+`vllm-qwen-flashnext` (Qwen3.8-Flash-Next) and `vllm-radiance` (Qwen3.8-27B-FP8,
+alternate community image) are separate services with their own `up`/`down`
+recipes (`just up-flashnext`, `just up-radiance`, `just down-radiance`,
+`just compose down vllm-qwen-flashnext`) — see
+[Choosing a service/profile](#choosing-a-serviceprofile) for when to use each
+one and why only one should run at a time on this host.
 
 To use Podman: `just --set runtime podman build` or `RUNTIME=podman just up`.
 Run `just --list` to see all recipes including `rebuild` (force-rebuild) and
@@ -49,17 +60,20 @@ HuggingFace model cache).
 
 Always go through `just`: each service's `env/<profile>.env` (passed to
 compose via `--env-file`) feeds the container's environment, and
-`entrypoint.sh` assembles the `vllm serve` arguments from it at startup. A
-bare `docker compose up` fails with a required-variable error
-(`MODEL_PROFILE`/`VISION_MODEL_PROFILE` unset) rather than starting servers
-with no model; a container whose profile vars are missing aborts with a
-message instead of serving.
+`entrypoint.sh` assembles the `vllm serve` arguments from it at startup (the
+`vllm-radiance` service is the one exception — see
+[Choosing a service/profile](#choosing-a-serviceprofile)). A bare
+`docker compose up` fails with a required-variable error (`MODEL_PROFILE`/
+`FLASHNEXT_PROFILE` unset) rather than starting a server with no model; a
+container whose profile vars are missing aborts with a message instead of
+serving.
 
 The vLLM OpenAI-compatible API is available at `http://localhost:8000/v1`
-(main container; `PORT` in `.env` to move it). Other containers on the same
+(`vllm` service; `PORT` in `.env` to move it). Other containers on the same
 compose network can reach it via the `llm-backend` network alias instead of
-the host port. The vision container serves at `http://localhost:8001/v1`
-(`VISION_PORT`) / `llm-vision-backend` alias.
+the host port. `vllm-qwen-flashnext` serves at `http://localhost:8001/v1`
+(`FLASHNEXT_PORT`) / `llm-flashnext-backend` alias, and `vllm-radiance` at
+`http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias.
 
 ## Configuration
 
@@ -81,12 +95,15 @@ production 7.2.x line lacks RDNA4/`gfx1201` support. AITER `v0.1.20` is the
 latest tagged release; vLLM is the 0.28.0rc2 prerelease (latest stable is
 0.27.1) since `gfx1201` requires source builds.
 
-The default (active) model is `Qwen/Qwen3.8-27B-FP8` (`qwen3.8-27b`, the
-newest dense 27B hybrid linear/full-attention architecture, MTP trained,
-vision). Alternatives: `Qwen/Qwen3.6-27B-FP8` (`qwen3.6-27b`, dense) and
+The default (active) model on the `vllm` service is `Qwen/Qwen3.8-27B-FP8`
+(`qwen3.8-27b`, the newest dense 27B hybrid linear/full-attention
+architecture, MTP trained, vision). Alternatives on the same service:
+`Qwen/Qwen3.6-27B-FP8` (`qwen3.6-27b`, dense) and
 `Qwen/Qwen3.6-35B-A3B-FP8` (`qwen3.6-35b-a3b`, 35B total / 3B active MoE).
 Model selection is controlled by `MODEL_PROFILE` in `.env` — override inline
-with `MODEL_PROFILE=qwen3.6-27b just up`.
+with `MODEL_PROFILE=qwen3.6-27b just up`. The other two services
+(`vllm-qwen-flashnext`, `vllm-radiance`) have their own profile variable and
+model — see [Choosing a service/profile](#choosing-a-serviceprofile).
 
 Runtime environment is split across files:
 - `env/2xr9700.vllm.common` — ROCm config for all four visible GPUs (arch, NCCL, HSA)
@@ -97,28 +114,57 @@ Runtime environment is split across files:
 - `env/qwen3.8-27b.env` — Qwen3.8-27B-FP8 dense model config (same
   architecture as 3.6-27B, so it shares the 3.6 common settings and tuned
   per-shape fp8 GEMM configs)
-- `env/qwen2.5-vl-72b-instruct.env` — Qwen2.5-VL-72B-Instruct-AWQ vision
-  profile for the `vllm-vision` container
+- `env/qwen3.8-27b-coexist.env`, `env/qwen3.8-27b-w4rtng128.env` — alternate
+  `vllm`-service profiles for A/B testing (e.g. a local W4A16 RTN quant); not
+  used by default
+- `env/qwen3.8-flash-next*.env` — `vllm-qwen-flashnext` service profiles
+  (`qwen3.8-flash-next-aixiaoma` is the one in active use; `-tiny` is a 119 MB
+  smoke-test checkpoint, `-w4rtng128*` are local RTN-quant variants). Selected
+  via `FLASHNEXT_PROFILE`, not `MODEL_PROFILE`.
+- `vllm-radiance` does **not** use an `env/<profile>.env` file — its model
+  path, quantization, and every `vllm serve` flag are hardcoded in
+  `compose.yaml`'s `command:` list, tunable only via the `RADIANCE_*`
+  variables in `.env` (see the comment block above the service definition).
 
-### Multiple containers
+### Choosing a service/profile
 
-`compose.yaml` defines a second service, `vllm-vision`: the same image and
-`entrypoint.sh`, but fed by `env/${VISION_MODEL_PROFILE}.env` (default
-`qwen2.5-vl-72b-instruct`), on host port `${VISION_PORT:-8001}` (main uses
-`${PORT:-8000}`), with its own triton/torchinductor/tilelang cache dirs
-(`~/.cache/{triton,torchinductor,tilelang}_vision`) so the two containers
-never share mutable compile-cache state. The aiter JIT dir is shared on
-purpose: `just prewarm` builds the kernels once in the main service's env and
-both containers then only read them (concurrent *builds* are the hazard).
+This host has four GPUs, and every profile here defaults to
+`--tensor-parallel-size 4` (all of them) because that's what benchmarks best
+for each model — there's no small/large split of GPUs to hand out per
+service. That's the practical reason the three services are meant to be run
+**one at a time, never concurrently**: two services both wanting all 4 GPUs
+would either fail to allocate VRAM or silently corrupt each other's KV cache
+if forced onto overlapping devices. (`vllm-qwen-flashnext` additionally pins
+~110 GiB of the *host's* RAM for its n-gram PLE table — another reason not to
+double up.) Pick one:
 
-`just up` starts both services; it waits for and warms up the main one while
-the (much larger) vision model keeps loading — check it with
-`just logs vllm-vision`. Select profiles with `MODEL_PROFILE` /
-`VISION_MODEL_PROFILE` (or `just --set model ...` / `just --set vision_model
-...`). Both containers see all four GPUs
-(`env/2xr9700.vllm.common`); when running them at the same time, give them
-non-overlapping GPU sets at runtime (e.g. `HIP_VISIBLE_DEVICES=0,1` vs `2,3`)
-and match `VLLM_TP` to the set size.
+| service               | model                       | port (default) | when to use |
+|:----------------------|:-----------------------------|:---------------:|:------------|
+| `vllm`                | Qwen3.6/3.8-27B dense, or 35B-A3B MoE (`MODEL_PROFILE`) | 8000 | Default/production choice. Built from source in this repo (`Dockerfile.fullbuild`), best-supported, most heavily tuned (GEMM configs, KV calibration, MTP depth sweeps — see [Performance](#performance)). |
+| `vllm-qwen-flashnext` | Qwen3.8-Flash-Next (GDN-hybrid/MoE, `qwen4_exp`) | 8001 | Trying the newer Flash-Next model. Built from a separate, newer vLLM head (`Dockerfile.flashnext`) that carries `qwen4_exp` support not yet in the main pin. Currently affected by an unresolved reasoning-loop issue under agentic/long-context use (see the `flashnext-vllm` container's own notes/commits) — treat as experimental. |
+| `vllm-radiance`       | Qwen3.8-27B-FP8 (same model as `vllm`'s default) | 8002 | A/B-testing raw throughput against `vllm`. Uses a prebuilt, gfx1201-hand-tuned community image (`stilldeadcode/vllm-radiance`) with custom kernels (R4D); no image build required (`docker pull` only), but not built/patched by this repo so it can't pick up local fixes. Validated at TP=4 with a clear performance win over TP=2 (see `benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md`). |
+
+Starting/stopping each:
+
+```sh
+just up               # start `vllm` (stop others first if they're running)
+just down              # stop `vllm`
+
+just build-flashnext && just up-flashnext   # start `vllm-qwen-flashnext`
+just compose down vllm-qwen-flashnext        # stop it
+
+just up-radiance       # start `vllm-radiance` (no build needed, image is pulled)
+just down-radiance      # stop it
+```
+
+If you deliberately want two of these running side by side (e.g. briefly,
+for an A/B comparison), you must partition the GPUs and VRAM/RAM yourself:
+lower `VLLM_TP`/`RADIANCE_TP` on each so their `HIP_VISIBLE_DEVICES` sets
+don't overlap, drop `--max-num-seqs`/`--gpu-memory-utilization` to fit both
+in memory, and make sure the host has enough free RAM left over for
+`vllm-qwen-flashnext`'s PLE table if that's one of the two. This is not the
+supported/tested configuration — expect to retune GEMM configs and re-run a
+coherence check before trusting the results.
 
 ### Chat template
 
@@ -126,9 +172,11 @@ All profiles mount [froggeric's Qwen-Fixed-Chat-Templates]
 (`chat-templates/qwen.jinja`, pinned to **v22.3** — `qwen3.8-froggeric-v22.3`,
 fetched from the repo's `main`). The `vllm` service sets
 `VLLM_CHAT_TEMPLATE` to that file, so `entrypoint.sh` applies it to the
-qwen3.x models, overriding each model's bundled template. The `vllm-vision`
-service leaves `VLLM_CHAT_TEMPLATE` unset and uses the tokenizer's built-in
-template (the froggeric template targets the qwen3.x models).
+qwen3.x models, overriding each model's bundled template. `vllm-radiance`
+passes the same file directly via `--chat-template` in its `command:` list.
+`vllm-qwen-flashnext` currently leaves the template unset and falls back to
+the tokenizer's built-in one (no `VLLM_CHAT_TEMPLATE` in its profile
+env files) — revisit if flashnext's agentic behavior needs the same fixes.
 The template fixes rendering bugs, KV-cache invalidation, token waste, and
 agentic stalling in the official Qwen templates, and adds tool-error retry
 warnings plus optional `tool_call_format="json"` / reasoning-effort steering
