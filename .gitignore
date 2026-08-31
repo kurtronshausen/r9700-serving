@@ -5,3 +5,6 @@ __pycache__/
 *.egg-info/
 __pypackages__/
 .xdg/
+
+# Personal working notes (agent-facing; see AGENTS.md for the tracked rules)
+CLAUDE.md
