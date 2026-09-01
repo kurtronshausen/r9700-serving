@@ -236,8 +236,8 @@ services:
       - --served-model-name=qwen3.8-27b-radiance
       - --quantization=fp8
       - --tensor-parallel-size=${RADIANCE_TP:-4}
-      - --max-num-seqs=${RADIANCE_MAX_NUM_SEQS:-8}
-      - --max-model-len=${RADIANCE_MAX_MODEL_LEN:-200000}
+      - --max-num-seqs=${RADIANCE_MAX_NUM_SEQS:-256}
+      - --max-model-len=${RADIANCE_MAX_MODEL_LEN:-262144}
       - --gpu-memory-utilization=${RADIANCE_GPU_UTIL:-0.90}
       - --max-num-batched-tokens=${RADIANCE_MAX_NUM_BATCHED_TOKENS:-4096}
       # bf16 KV (not radiance's own fp8-KV reference default): matches this
