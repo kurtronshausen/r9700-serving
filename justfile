@@ -114,6 +114,11 @@ clear-vllm-caches:
         "$HOME/.cache/triton_radiance"
         "$HOME/.cache/torchinductor_radiance"
         "$HOME/.cache/aiter_radiance"
+        # vllm-mxfp4 service's per-container compile caches
+        "$HOME/.cache/vllm_mxfp4"
+        "$HOME/.cache/triton_mxfp4"
+        "$HOME/.cache/torchinductor_mxfp4"
+        "$HOME/.cache/aiter_mxfp4"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -338,6 +343,25 @@ up-radiance: check
 # running if they are up).
 down-radiance:
     @{{compose}} down vllm-radiance
+
+# Start the vllm-mxfp4 service (Qwen3.8-Flash-Next-MXFP4-FP8 via the prebuilt
+# tcclaviger/vllm:dev image — no build step, just `docker pull`). TP=4 wants
+# all four GPUs and the PLE table pins ~110 GiB of host RAM, so it is not
+# intended to run concurrently with `vllm`/`vllm-qwen-flashnext`/`vllm-radiance`.
+up-mxfp4: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mxfp4_port="$(grep -m1 '^MXFP4_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    mxfp4_port="${mxfp4_port:-8003}"
+    {{compose}} up -d vllm-mxfp4
+    printf 'vllm-mxfp4 starting at http://localhost:%s/v1 (fresh image —\n' "$mxfp4_port"
+    printf 'first boot downloads the ~126 GB checkpoint and compiles Triton/\n'
+    printf 'inductor kernels; check readiness with `just logs vllm-mxfp4` or\n'
+    printf '`just compose ps`).\n'
+
+# Stop just the vllm-mxfp4 service (leaves the other services running).
+down-mxfp4:
+    @{{compose}} down vllm-mxfp4
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:

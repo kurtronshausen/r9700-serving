@@ -2,13 +2,13 @@
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
 configuration targets four R9700s (`gfx1201`) and serves a model through
-vLLM's OpenAI-compatible API. `compose.yaml` defines three independent
+vLLM's OpenAI-compatible API. `compose.yaml` defines four independent
 services — `vllm` (dense Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 (Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
-and `vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
-community image) — each with its own port, model profile, and compile-cache
-dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to
-pick one and why they aren't meant to run together).
+`vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
+community image), and `vllm-mxfp4` (Qwen3.8-Flash-Next-MXFP4-FP8 served by the
+prebuilt `tcclaviger/vllm` community image) — each with its own port, model
+profile, and compile-cache dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to pick one and why they aren't meant to run together).
 
 ## Requirements
 
@@ -72,8 +72,10 @@ The vLLM OpenAI-compatible API is available at `http://localhost:8000/v1`
 (`vllm` service; `PORT` in `.env` to move it). Other containers on the same
 compose network can reach it via the `llm-backend` network alias instead of
 the host port. `vllm-qwen-flashnext` serves at `http://localhost:8001/v1`
-(`FLASHNEXT_PORT`) / `llm-flashnext-backend` alias, and `vllm-radiance` at
-`http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias.
+(`FLASHNEXT_PORT`) / `llm-flashnext-backend` alias, `vllm-radiance` at
+`http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias,
+and `vllm-mxfp4` at `http://localhost:8003/v1` (`MXFP4_PORT`) /
+`llm-mxfp4-backend` alias.
 
 ## Configuration
 
@@ -131,18 +133,19 @@ Runtime environment is split across files:
 This host has four GPUs, and every profile here defaults to
 `--tensor-parallel-size 4` (all of them) because that's what benchmarks best
 for each model — there's no small/large split of GPUs to hand out per
-service. That's the practical reason the three services are meant to be run
+service. That's the practical reason the four services are meant to be run
 **one at a time, never concurrently**: two services both wanting all 4 GPUs
 would either fail to allocate VRAM or silently corrupt each other's KV cache
-if forced onto overlapping devices. (`vllm-qwen-flashnext` additionally pins
-~110 GiB of the *host's* RAM for its n-gram PLE table — another reason not to
-double up.) Pick one:
+if forced onto overlapping devices. (`vllm-qwen-flashnext` and `vllm-mxfp4`
+additionally pin ~110 GiB of the *host's* RAM for their n-gram PLE tables —
+another reason not to double up.) Pick one:
 
 | service               | model                       | port (default) | when to use |
 |:----------------------|:-----------------------------|:---------------:|:------------|
 | `vllm`                | Qwen3.6/3.8-27B dense, or 35B-A3B MoE (`MODEL_PROFILE`) | 8000 | Default/production choice. Built from source in this repo (`Dockerfile.fullbuild`), best-supported, most heavily tuned (GEMM configs, KV calibration, MTP depth sweeps — see [Performance](#performance)). |
 | `vllm-qwen-flashnext` | Qwen3.8-Flash-Next (GDN-hybrid/MoE, `qwen4_exp`) | 8001 | Trying the newer Flash-Next model. Built from a separate, newer vLLM head (`Dockerfile.flashnext`) that carries `qwen4_exp` support not yet in the main pin. Currently affected by an unresolved reasoning-loop issue under agentic/long-context use (see the `flashnext-vllm` container's own notes/commits) — treat as experimental. |
 | `vllm-radiance`       | Qwen3.8-27B-FP8 (same model as `vllm`'s default) | 8002 | A/B-testing raw throughput against `vllm`. Uses a prebuilt, gfx1201-hand-tuned community image (`stilldeadcode/vllm-radiance`) with custom kernels (R4D); no image build required (`docker pull` only), but not built/patched by this repo so it can't pick up local fixes. Validated at TP=4 with a clear performance win over TP=2 (see `benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md`). |
+| `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm:dev`); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; first boot pulls the ~126 GB checkpoint. |
 
 Starting/stopping each:
 
@@ -155,16 +158,20 @@ just compose down vllm-qwen-flashnext        # stop it
 
 just up-radiance       # start `vllm-radiance` (no build needed, image is pulled)
 just down-radiance      # stop it
+
+just up-mxfp4          # start `vllm-mxfp4` (no build needed, image is pulled)
+just down-mxfp4        # stop it
 ```
 
 If you deliberately want two of these running side by side (e.g. briefly,
 for an A/B comparison), you must partition the GPUs and VRAM/RAM yourself:
-lower `VLLM_TP`/`RADIANCE_TP` on each so their `HIP_VISIBLE_DEVICES` sets
-don't overlap, drop `--max-num-seqs`/`--gpu-memory-utilization` to fit both
-in memory, and make sure the host has enough free RAM left over for
-`vllm-qwen-flashnext`'s PLE table if that's one of the two. This is not the
-supported/tested configuration — expect to retune GEMM configs and re-run a
-coherence check before trusting the results.
+lower `VLLM_TP`/`RADIANCE_TP`/`MXFP4_TP` on each so their
+`HIP_VISIBLE_DEVICES` sets don't overlap, drop `--max-num-seqs`/
+`--gpu-memory-utilization` to fit both in memory, and make sure the host has
+enough free RAM left over for `vllm-qwen-flashnext`'s / `vllm-mxfp4`'s PLE
+table if that's one of the two. This is not the supported/tested
+configuration — expect to retune GEMM configs and re-run a coherence check
+before trusting the results.
 
 ### Chat template
 

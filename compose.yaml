@@ -340,3 +340,105 @@ services:
       # boot (upstream: "a few extra minutes compiling Triton / inductor
       # kernels before the engine comes up").
       start_period: 1800s
+
+  # Fourth, standalone vLLM server: the prebuilt `tcclaviger/vllm` image
+  # (Docker Hub, NOT built by this repo) serving
+  # tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8 — the same Qwen3.8-Flash-Next
+  # (qwen4_exp) family as `vllm-qwen-flashnext`, but tcclaviger's own
+  # MXFP4-experts / FP8-attention-and-MTP / FP8-n-gram quant with calibrated
+  # fp8 KV scales and his GDN/PLE kernel work (CLAV_GDN=1).
+  #
+  # Tag: :dev. The model card names `DevQwenNextFlash`, but that tag is gone
+  # from Docker Hub — `dev` and `28.02.2` now resolve to the same image
+  # (2026-09-08), and the card states "Only the :dev image tag at
+  # tcclaviger/vllm can serve this model."
+  #
+  # Like `vllm-radiance`, this is a prebuilt community image: its ENTRYPOINT
+  # is tcclaviger's own (banner + `exec vllm serve "$@"`), so args come from
+  # `command:` below (mirroring his model-card example) and it uses no
+  # `env/${profile}.env` file. It is NOT built/patched by this repo and
+  # can't pick up local fixes.
+  #
+  # Same one-at-a-time constraint as the other three: TP=4 wants all four
+  # GPUs, and VLLM_PLE_CPU_OFFLOAD pins ~110 GiB of host RAM for the 51B
+  # n-gram PLE table.
+  vllm-mxfp4:
+    <<: *amd_devices
+    image: docker.io/tcclaviger/vllm:${MXFP4_VLLM_TAG:-dev}
+    container_name: vllm-mxfp4
+    restart: unless-stopped
+    ports:
+      - "${MXFP4_PORT:-8003}:8080"
+    networks:
+      default:
+        aliases:
+          - llm-mxfp4-backend
+    command:
+      # Model is resolved from the host HF cache via the ${HOME}:${HOME}
+      # mount (first boot downloads the 125.8 GB checkpoint into
+      # ~/.cache/huggingface).
+      - tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8
+      - --tensor-parallel-size=${MXFP4_TP:-4}
+      - --served-model-name=Qwen3.8-Flash-Next-MXFP4-FP8
+      # His validated flags (HF model card, 2026-09). Quantization is baked
+      # into the checkpoint (compressed-tensors MXFP4/FP8) — no --quantization.
+      # fp8 KV: the checkpoint ships calibrated KV scales
+      # (model-kvscales.safetensors), so fp8 KV is correctly scaled here
+      # (unlike the stock 27B-FP8 checkpoint, which is why we default bf16
+      # elsewhere).
+      - --kv-cache-dtype=fp8
+      - --max-model-len=${MXFP4_MAX_MODEL_LEN:-262144}
+      - --gpu-memory-utilization=${MXFP4_GPU_UTIL:-0.92}
+      - --max-num-seqs=${MXFP4_MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${MXFP4_MAX_NUM_BATCHED_TOKENS:-4096}
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # MTP self-speculation (head is in the checkpoint, no drafter).
+      - '--speculative-config={"method":"mtp","num_speculative_tokens":3}'
+      # CUDA graphs without torch.compile: decode-only capture (his example's
+      # sizes list; mode stays eager).
+      - '--compilation-config={"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"max_cudagraph_capture_size":32}'
+      # YaRN 2x rope extension: the model's native context is 262144; the
+      # card's --max-model-len 524288 example relies on this to extrapolate.
+      # Kept so MXFP4_MAX_MODEL_LEN can be bumped to 524288 without a
+      # config change.
+      - '--hf-overrides={"text_config":{"rope_parameters":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":262144,"mrope_section":[11,11,10],"mrope_interleaved":true,"partial_rotary_factor":0.25,"rope_theta":10000000}}}'
+      - --tool-call-parser=qwen3_coder
+      - --enable-auto-tool-choice
+      - --reasoning-parser=qwen3
+      - '--limit-mm-per-prompt={"video":1,"image":20}'
+      - --mm-processor-cache-gb=0.5
+      - '--override-generation-config={"max_tokens":65536,"temperature":1.0,"top_p":0.95,"top_k":40,"presence_penalty":1}'
+      - --host=0.0.0.0
+      - --port=8080
+    environment:
+      - HOME=${HOME}
+      # GPU visibility: HIP index only, never CUDA_VISIBLE_DEVICES.
+      - HIP_VISIBLE_DEVICES=${MXFP4_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - ROCR_VISIBLE_DEVICES=${MXFP4_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      # tcclaviger's image serves qwen4_exp with its own kernel paths
+      # (CLAV_GDN): AITER is OFF (his example sets VLLM_ROCM_USE_AITER=0) —
+      # do not import our aiter-unified-attention env here.
+      - VLLM_ROCM_USE_AITER=0
+      - CLAV_GDN=1
+      # 51B n-gram PLE table pinned in host RAM (~110 GiB free needed).
+      - VLLM_PLE_CPU_OFFLOAD=1
+      # Per-container compile caches (own suffix, mirrors the `_flashnext`
+      # / `_radiance` convention) so this image's JIT/inductor cache never
+      # shares mutable state with the other services.
+      - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_mxfp4
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_mxfp4
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_mxfp4
+      - AITER_ROOT_DIR=${HOME}/.cache/aiter_mxfp4
+    volumes:
+      # HF model cache: the command's model id resolves here.
+      - ${HOME}:${HOME}
+      - ${HOME}/.vllm-workspace:/workspace
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 60
+      # Generous: first boot downloads the 125.8 GB checkpoint into the host
+      # HF cache AND compiles Triton/inductor kernels from scratch.
+      start_period: 1800s
