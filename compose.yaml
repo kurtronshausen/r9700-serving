@@ -411,6 +411,10 @@ services:
       - --tool-call-parser=qwen3_coder
       - --enable-auto-tool-choice
       - --reasoning-parser=qwen3
+      # Froggeric template (same one radiance uses for this model family)
+      # instead of the checkpoint's built-in template, which raises on
+      # reasoning_effort=high. Maps high→low here; see qwen.jinja.
+      - --chat-template=/app/chat-templates/qwen.jinja
       - '--limit-mm-per-prompt={"video":1,"image":20}'
       - --mm-processor-cache-gb=0.5
       - '--override-generation-config={"max_tokens":65536,"temperature":1.0,"top_p":0.95,"top_k":40,"presence_penalty":1}'
@@ -436,6 +440,7 @@ services:
       - TRITON_CACHE_DIR=${HOME}/.cache/triton_mxfp4
       - AITER_ROOT_DIR=${HOME}/.cache/aiter_mxfp4
     volumes:
+      - ./chat-templates/:/app/chat-templates
       - ${HOME}:${HOME}
       - ${HOME}/.vllm-workspace:/workspace
       # Local checkpoints (the 125.8 GB MXFP4-FP8 model referenced in

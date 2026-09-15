@@ -23,7 +23,11 @@
     {%- set _initial_effort = 'medium' %}
 {%- elif _effort_raw in ('minimal', 'low') %}
     {%- set _initial_effort = 'low' %}
-{%- elif _effort_raw in ('high', 'xhigh', 'max', 'ultracode', 'extreme') %}
+{%- elif _effort_raw == 'high' %}
+    {# high is not a tier in this template family (xhigh/medium/low only);
+       map it to low instead of raising or falling through to xhigh. #}
+    {%- set _initial_effort = 'low' %}
+{%- elif _effort_raw in ('xhigh', 'max', 'ultracode', 'extreme') %}
     {%- set _initial_effort = 'xhigh' %}
 {%- else %}
     {%- set _initial_effort = 'medium' %}
