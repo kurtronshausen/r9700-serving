@@ -382,9 +382,15 @@ services:
       # Do NOT use the bare HF id here — vLLM would resolve it through the
       # HF hub and download into ~/.cache/huggingface (this image runs as
       # root, writing root-owned blobs) and fill /home.
-      - /srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8
+      # GPTQ ("AA2") build: activation-aware MXFP4 experts + int6 PLE table,
+      # better PPL/top-1 than the prior MXFP4-FP8. Overridable via
+      # MXFP4_MODEL_DIR to fall back to the older checkpoint.
+      - ${MXFP4_MODEL_DIR:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}
       - --tensor-parallel-size=${MXFP4_TP:-4}
-      - --served-model-name=Qwen3.8-Flash-Next-MXFP4-FP8
+      # Keep the name clients already address (:8003) so the swap is in-place;
+      # his card's `--served-model-name Qwen3.8-Flash-Next` differs — override
+      # MXFP4_SERVED_NAME if you want to match it.
+      - --served-model-name=${MXFP4_SERVED_NAME:-Qwen3.8-Flash-Next-MXFP4-FP8}
       # His validated flags (HF model card, 2026-09). Quantization is baked
       # into the checkpoint (compressed-tensors MXFP4/FP8) — no --quantization.
       # fp8 KV: the checkpoint ships calibrated KV scales
@@ -430,8 +436,25 @@ services:
       # do not import our aiter-unified-attention env here.
       - VLLM_ROCM_USE_AITER=0
       - CLAV_GDN=1
-      # 51B n-gram PLE table pinned in host RAM (~110 GiB free needed).
+      # 51B n-gram PLE table pinned in host RAM. The GPTQ build stores the
+      # table as int6 (41.6 GB vs 51.3 GB FP8), so this needs less host RAM
+      # than the prior MXFP4-FP8 checkpoint (~110 GiB) did.
       - VLLM_PLE_CPU_OFFLOAD=1
+      # tcclaviger's tuning env from the GPTQ model card (2026-09). All
+      # overridable so they can be A/B'd against prior defaults without a
+      # compose edit.
+      - OMP_NUM_THREADS=${MXFP4_OMP_NUM_THREADS:-8}
+      - GPU_MAX_HW_QUEUES=${MXFP4_GPU_MAX_HW_QUEUES:-1}
+      - HSA_ENABLE_INTERRUPT=${MXFP4_HSA_ENABLE_INTERRUPT:-1}
+      - HSA_ENABLE_MWAITX=${MXFP4_HSA_ENABLE_MWAITX:-1}
+      # tunableop kernel autotuning: ENABLED stays 0 until a tuned CSV has
+      # been recorded (a first pass with TUNING=1 writes PYTORCH_TUNABLEOP_FILENAME),
+      # since replaying an empty CSV gains nothing. When enabling, also mount
+      # the /tunableop volume below.
+      - PYTORCH_TUNABLEOP_ENABLED=${MXFP4_TUNABLEOP_ENABLED:-0}
+      - PYTORCH_TUNABLEOP_TUNING=${MXFP4_TUNABLEOP_TUNING:-0}
+      - PYTORCH_TUNABLEOP_RECORD_UNTUNED=${MXFP4_TUNABLEOP_RECORD_UNTUNED:-0}
+      - PYTORCH_TUNABLEOP_FILENAME=${MXFP4_TUNABLEOP_FILENAME:-/tunableop/tunedop.csv}
       # Per-container compile caches (own suffix, mirrors the `_flashnext`
       # / `_radiance` convention) so this image's JIT/inductor cache never
       # shares mutable state with the other services.
@@ -443,9 +466,12 @@ services:
       - ./chat-templates/:/app/chat-templates
       - ${HOME}:${HOME}
       - ${HOME}/.vllm-workspace:/workspace
-      # Local checkpoints (the 125.8 GB MXFP4-FP8 model referenced in
-      # `command:` above) live under /srv/llm, outside HOME.
+      # Local checkpoint (the ~116 GB MXFP4-FP8-GPTQ model referenced in
+      # `command:` above) lives under /srv/llm, outside HOME.
       - /srv/llm:/srv/llm
+      # Uncomment alongside MXFP4_TUNABLEOP_ENABLED=1 to give the recorded
+      # kernel CSV a persistent home (see PYTORCH_TUNABLEOP_FILENAME above).
+      # - ${HOME}/.cache/tunableop_mxfp4:/tunableop
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
