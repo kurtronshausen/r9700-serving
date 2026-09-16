@@ -398,17 +398,20 @@ services:
       # (unlike the stock 27B-FP8 checkpoint, which is why we default bf16
       # elsewhere).
       - --kv-cache-dtype=fp8
-      - --max-model-len=${MXFP4_MAX_MODEL_LEN:-262144}
-      - --gpu-memory-utilization=${MXFP4_GPU_UTIL:-0.92}
+      # YaRN factor 2.0 in --hf-overrides lets 524288 extrapolate from the
+      # 262144 native context (his TP4 card example).
+      - --max-model-len=${MXFP4_MAX_MODEL_LEN:-524288}
+      - --gpu-memory-utilization=${MXFP4_GPU_UTIL:-0.97}
       - --max-num-seqs=${MXFP4_MAX_NUM_SEQS:-16}
-      - --max-num-batched-tokens=${MXFP4_MAX_NUM_BATCHED_TOKENS:-4096}
+      - --max-num-batched-tokens=${MXFP4_MAX_NUM_BATCHED_TOKENS:-8192}
       - --enable-prefix-caching
       - --enable-chunked-prefill
       # MTP self-speculation (head is in the checkpoint, no drafter).
       - '--speculative-config={"method":"mtp","num_speculative_tokens":3}'
-      # CUDA graphs without torch.compile: decode-only capture (his example's
-      # sizes list; mode stays eager).
-      - '--compilation-config={"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"max_cudagraph_capture_size":32}'
+      # CUDA graphs without torch.compile: decode-only capture. His TP4 card
+      # example captures only size [4] (mode stays eager); widen via
+      # MXFP4_CUDAGRAPH_SIZES if you batch more concurrency.
+      - '--compilation-config={"cudagraph_capture_sizes":${MXFP4_CUDAGRAPH_SIZES:-[4]},"max_cudagraph_capture_size":${MXFP4_MAX_CUDAGRAPH_SIZE:-4}}'
       # YaRN 2x rope extension: the model's native context is 262144; the
       # card's --max-model-len 524288 example relies on this to extrapolate.
       # Kept so MXFP4_MAX_MODEL_LEN can be bumped to 524288 without a
@@ -423,7 +426,7 @@ services:
       - --chat-template=/app/chat-templates/qwen.jinja
       - '--limit-mm-per-prompt={"video":1,"image":20}'
       - --mm-processor-cache-gb=0.5
-      - '--override-generation-config={"max_tokens":65536,"temperature":1.0,"top_p":0.95,"top_k":40,"presence_penalty":1}'
+      - '--override-generation-config={"max_tokens":${MXFP4_MAX_TOKENS:-65536},"temperature":${MXFP4_TEMPERATURE:-0.8},"top_p":${MXFP4_TOP_P:-0.95},"top_k":${MXFP4_TOP_K:-40},"presence_penalty":${MXFP4_PRESENCE_PENALTY:-1}}'
       - --host=0.0.0.0
       - --port=8080
     environment:
@@ -477,6 +480,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 60
-      # Generous: first boot loads the 125.8 GB checkpoint from /srv/llm
+      # Generous: first boot loads the ~116 GB checkpoint from /srv/llm
       # AND compiles Triton/inductor kernels from scratch.
       start_period: 1800s
