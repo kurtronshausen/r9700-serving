@@ -119,6 +119,11 @@ clear-vllm-caches:
         "$HOME/.cache/triton_mxfp4"
         "$HOME/.cache/torchinductor_mxfp4"
         "$HOME/.cache/aiter_mxfp4"
+        # vllm-gptq service's per-container compile caches
+        "$HOME/.cache/vllm_gptq"
+        "$HOME/.cache/triton_gptq"
+        "$HOME/.cache/torchinductor_gptq"
+        "$HOME/.cache/aiter_gptq"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -370,6 +375,38 @@ up-mxfp4: check
 # Stop just the vllm-mxfp4 service (leaves the other services running).
 down-mxfp4:
     @{{compose}} down vllm-mxfp4
+
+# Start the vllm-gptq service — the GPTQ ("AA2") checkpoint of the same model,
+# as a separate service so switching checkpoints needs no compose edit and no
+# cache clear (each has its own cache suffix). It resolves the GPTQ_VLLM_TAG
+# image by tag with pull_policy: always, so every start re-pulls the newest
+# build of that tag. Not intended to run concurrently with any other service:
+# TP=4 wants all four GPUs and the PLE table pins ~116 GiB of host RAM.
+up-gptq: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gptq_model="$(grep -m1 '^GPTQ_MODEL_DIR=' .env 2>/dev/null | cut -d= -f2- || true)"
+    gptq_model="${gptq_model:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}"
+    if [ ! -f "$gptq_model/model.safetensors.index.json" ]; then
+      printf 'error: model not found at %s\n' "$gptq_model" >&2
+      printf 'Download it first (109 GB, resumable):\n' >&2
+      printf '  hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \\\n' >&2
+      printf '    --local-dir %s\n' "$gptq_model" >&2
+      exit 1
+    fi
+    gptq_port="$(grep -m1 '^GPTQ_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    gptq_port="${gptq_port:-8004}"
+    gptq_tag="$(grep -m1 '^GPTQ_VLLM_TAG=' .env 2>/dev/null | cut -d= -f2- || true)"
+    gptq_tag="${gptq_tag:-29.02.1}"
+    {{compose}} up -d vllm-gptq
+    printf 'vllm-gptq starting at http://localhost:%s/v1 (re-pulled %s first).\n' "$gptq_port" "$gptq_tag"
+    printf 'First boot loads the 109 GB checkpoint from /srv/llm and compiles\n'
+    printf 'Triton/inductor kernels into a cold cache — can take 20+ min;\n'
+    printf 'check readiness with `just logs vllm-gptq`.\n'
+
+# Stop just the vllm-gptq service (leaves the other services running).
+down-gptq:
+    @{{compose}} down vllm-gptq
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:

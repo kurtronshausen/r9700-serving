@@ -348,10 +348,12 @@ services:
   # MXFP4-experts / FP8-attention-and-MTP / FP8-n-gram quant with calibrated
   # fp8 KV scales and his GDN/PLE kernel work (CLAV_GDN=1).
   #
-  # Tag: :dev. The model card names `DevQwenNextFlash`, but that tag is gone
-  # from Docker Hub — `dev` and `28.02.2` now resolve to the same image
-  # (2026-09-08), and the card states "Only the :dev image tag at
-  # tcclaviger/vllm can serve this model."
+  # Image: PINNED BY DIGEST. The model card states "Only the :dev image tag at
+  # tcclaviger/vllm can serve this model", but `dev` is a *mutable* tag: it
+  # pointed at the 2026-09-07 build this service has always run and now points
+  # at a 2026-09-21 rebuild. Pinning the digest keeps a hub push from silently
+  # breaking the working service. To bump deliberately, resolve the new `dev`
+  # digest and replace MXFP4_VLLM_REF.
   #
   # Like `vllm-radiance`, this is a prebuilt community image: its ENTRYPOINT
   # is tcclaviger's own (banner + `exec vllm serve "$@"`), so args come from
@@ -364,7 +366,7 @@ services:
   # n-gram PLE table.
   vllm-mxfp4:
     <<: *amd_devices
-    image: docker.io/tcclaviger/vllm:${MXFP4_VLLM_TAG:-dev}
+    image: docker.io/tcclaviger/vllm@${MXFP4_VLLM_REF:-sha256:4fd57a9c7e313183ea973227fddcd30e4d6712581c0fa2954607a807d34693dc}
     container_name: vllm-mxfp4
     restart: unless-stopped
     ports:
@@ -453,4 +455,132 @@ services:
       retries: 60
       # Generous: first boot loads the 125.8 GB checkpoint from /srv/llm
       # AND compiles Triton/inductor kernels from scratch.
+      start_period: 1800s
+
+  # Fifth, standalone vLLM server: the GPTQ ("AA2") build of the same
+  # Qwen3.8-Flash-Next model family, kept as a SEPARATE service from
+  # `vllm-mxfp4` so a checkpoint switch is a `just` invocation rather than a
+  # compose edit + cache clear. The GPTQ quant stores the n-gram PLE table as
+  # int6 (41.6 GB vs 51.3 GB FP8) and uses activation-aware MXFP4 experts,
+  # for better PPL/top-1 than the MXFP4-FP8 checkpoint `vllm-mxfp4` serves.
+  #
+  # Image: resolved by TAG with `pull_policy: always`, because this checkpoint
+  # needs a newer image than the pinned one above and we want the newest build
+  # on every start. Use the version tag, NOT `latest`: on 2026-09-21 `latest`
+  # still resolves to a 2026-09-14 build while `29.02.1` (== today's `dev`) is
+  # 7 days newer. Set GPTQ_VLLM_REF to a digest to freeze this service too.
+  #
+  # The serve config below comes from the GPTQ model card's TP4 example, not
+  # from `--recipes`: as of 29.02.1 every bundled recipe is TP2 on the
+  # MXFP4-FP8 checkpoint, so there is no confirmed TP4 or GPTQ configuration
+  # to copy. Treat this service as experimental.
+  #
+  # Driver-tuning env from the card example (GPU_MAX_HW_QUEUES=1,
+  # HSA_ENABLE_INTERRUPT=1, HSA_ENABLE_MWAITX=1) is deliberately NOT set here:
+  # it was present for the only `amdgpu` MES unrecoverable + failed-GPU-reset
+  # that hard-hung the host, and none of the image's own confirmed recipes set
+  # any of it. Add them via the env block below if you want to A/B them.
+  vllm-gptq:
+    <<: *amd_devices
+    pull_policy: always
+    image: docker.io/tcclaviger/vllm:${GPTQ_VLLM_TAG:-29.02.1}
+    container_name: vllm-gptq
+    restart: unless-stopped
+    ports:
+      - "${GPTQ_PORT:-8004}:8080"
+    networks:
+      default:
+        aliases:
+          - llm-gptq-backend
+    ulimits:
+      # His recipes all raise memlock: VLLM_PLE_CPU_OFFLOAD pins tens of GB
+      # of PLE tables in host RAM and wants them non-swappable.
+      memlock:
+        soft: -1
+        hard: -1
+    command:
+      # Local path (repo convention: big models live under /srv/llm on the
+      # 1.3T /srv/llm volume, NOT in ~/.cache on the 98G /home volume).
+      # Downloaded once via:
+      #   hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \
+      #     --local-dir /srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ
+      # Do NOT use the bare HF id here — vLLM would resolve it through the
+      # HF hub and download into ~/.cache/huggingface (this image runs as
+      # root, writing root-owned blobs) and fill /home.
+      - ${GPTQ_MODEL_DIR:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}
+      - --tensor-parallel-size=${GPTQ_TP:-4}
+      - --served-model-name=${GPTQ_SERVED_NAME:-Qwen3.8-Flash-Next-MXFP4-FP8}
+      # Quantization is baked into the checkpoint (compressed-tensors
+      # MXFP4-pack + int6 PLE) — no --quantization flag. fp8 KV: the
+      # checkpoint ships calibrated KV scales, as with vllm-mxfp4.
+      - --kv-cache-dtype=fp8
+      # Card TP4 example runs 524288 via the YaRN --hf-overrides below (native
+      # context is 262144). Doubling the context doubles the worst-case KV
+      # reservation per request, so drop to 262144 via GPTQ_MAX_MODEL_LEN if
+      # concurrency suffers KV pressure.
+      - --max-model-len=${GPTQ_MAX_MODEL_LEN:-524288}
+      # 0.97 per the card example. The pool is sized AFTER CUDA-graph capture,
+      # so a lower value here silently costs KV tokens (vllm prints the
+      # equivalent utilization it actually used).
+      - --gpu-memory-utilization=${GPTQ_GPU_UTIL:-0.97}
+      - --max-num-seqs=${GPTQ_MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${GPTQ_MAX_NUM_BATCHED_TOKENS:-8192}
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # MTP self-speculation (head is in the checkpoint, no drafter).
+      - '--speculative-config={"method":"mtp","num_speculative_tokens":3}'
+      # Decode-only CUDA graph capture over the concurrency ladder (same list
+      # his TP2 recipes use, rather than the single-size capture in the card's
+      # TP4 example).
+      - '--compilation-config={"cudagraph_capture_sizes":${GPTQ_CUDAGRAPH_SIZES:-[4,8,12,16,20,24,28,32]},"max_cudagraph_capture_size":${GPTQ_MAX_CUDAGRAPH_SIZE:-32}}'
+      - '--hf-overrides={"text_config":{"rope_parameters":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":262144,"mrope_section":[11,11,10],"mrope_interleaved":true,"partial_rotary_factor":0.25,"rope_theta":10000000}}}'
+      - --tool-call-parser=qwen3_coder
+      - --enable-auto-tool-choice
+      - --reasoning-parser=qwen3
+      # Froggeric template (same as vllm-mxfp4): the GPTQ checkpoint's own
+      # template has the same reasoning_effort bug, so keep the override.
+      - --chat-template=/app/chat-templates/qwen.jinja
+      - '--limit-mm-per-prompt={"video":1,"image":20}'
+      - --mm-processor-cache-gb=0.5
+      # Card sampling defaults (note: temperature 0.8, vs 1.0 for vllm-mxfp4).
+      - '--override-generation-config={"max_tokens":${GPTQ_MAX_TOKENS:-65536},"temperature":${GPTQ_TEMPERATURE:-0.8},"top_p":${GPTQ_TOP_P:-0.95},"top_k":${GPTQ_TOP_K:-40},"presence_penalty":${GPTQ_PRESENCE_PENALTY:-1}}'
+      - --host=0.0.0.0
+      - --port=8080
+    environment:
+      - HOME=${HOME}
+      # GPU visibility: HIP index only, never CUDA_VISIBLE_DEVICES.
+      - HIP_VISIBLE_DEVICES=${GPTQ_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - ROCR_VISIBLE_DEVICES=${GPTQ_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - VLLM_ROCM_USE_AITER=0
+      - CLAV_GDN=1
+      # int6 n-gram PLE table pinned in host RAM (~116 GB total footprint).
+      - VLLM_PLE_CPU_OFFLOAD=1
+      - OMP_NUM_THREADS=${GPTQ_OMP_NUM_THREADS:-8}
+      # Own cache suffix — NOT shared with vllm-mxfp4. These caches key on
+      # the checkpoint, so two checkpoints in one dir corrupt each other's
+      # compiled kernels. They are root-owned (this image runs as root), so
+      # clearing them needs sudo rather than `just clear-vllm-caches`.
+      - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_gptq
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_gptq
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_gptq
+      - AITER_ROOT_DIR=${HOME}/.cache/aiter_gptq
+      # Card driver-tuning env, off by default — see the service comment.
+      # Uncomment ONE at a time to A/B it. (An empty-value assignment such as
+      # GPU_MAX_HW_QUEUES= is not the same as leaving it unset, so there is no
+      # `.env`-driven default form here.)
+      # - GPU_MAX_HW_QUEUES=1
+      # - HSA_ENABLE_INTERRUPT=1
+      # - HSA_ENABLE_MWAITX=1
+    volumes:
+      - ./chat-templates/:/app/chat-templates
+      - ${HOME}:${HOME}
+      - ${HOME}/.vllm-workspace:/workspace
+      - /srv/llm:/srv/llm
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 60
+      # Generous: first boot loads the 116 GB checkpoint from /srv/llm AND
+      # compiles Triton/inductor kernels from scratch into empty caches.
       start_period: 1800s

@@ -2,12 +2,13 @@
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
 configuration targets four R9700s (`gfx1201`) and serves a model through
-vLLM's OpenAI-compatible API. `compose.yaml` defines four independent
+vLLM's OpenAI-compatible API. `compose.yaml` defines five independent
 services — `vllm` (dense Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 (Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
 `vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
-community image), and `vllm-mxfp4` (Qwen3.8-Flash-Next-MXFP4-FP8 served by the
-prebuilt `tcclaviger/vllm` community image) — each with its own port, model
+community image), `vllm-mxfp4` and `vllm-gptq` (two quantizations of
+Qwen3.8-Flash-Next served by the prebuilt `tcclaviger/vllm` community image) —
+each with its own port, model
 profile, and compile-cache dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to pick one and why they aren't meant to run together).
 
 ## Requirements
@@ -75,7 +76,8 @@ the host port. `vllm-qwen-flashnext` serves at `http://localhost:8001/v1`
 (`FLASHNEXT_PORT`) / `llm-flashnext-backend` alias, `vllm-radiance` at
 `http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias,
 and `vllm-mxfp4` at `http://localhost:8003/v1` (`MXFP4_PORT`) /
-`llm-mxfp4-backend` alias.
+`llm-mxfp4-backend` alias, and `vllm-gptq` at `http://localhost:8004/v1`
+(`GPTQ_PORT`) / `llm-gptq-backend` alias.
 
 ## Configuration
 
@@ -133,7 +135,7 @@ Runtime environment is split across files:
 This host has four GPUs, and every profile here defaults to
 `--tensor-parallel-size 4` (all of them) because that's what benchmarks best
 for each model — there's no small/large split of GPUs to hand out per
-service. That's the practical reason the four services are meant to be run
+service. That's the practical reason the five services are meant to be run
 **one at a time, never concurrently**: two services both wanting all 4 GPUs
 would either fail to allocate VRAM or silently corrupt each other's KV cache
 if forced onto overlapping devices. (`vllm-qwen-flashnext` and `vllm-mxfp4`
@@ -145,7 +147,8 @@ another reason not to double up.) Pick one:
 | `vllm`                | Qwen3.6/3.8-27B dense, or 35B-A3B MoE (`MODEL_PROFILE`) | 8000 | Default/production choice. Built from source in this repo (`Dockerfile.fullbuild`), best-supported, most heavily tuned (GEMM configs, KV calibration, MTP depth sweeps — see [Performance](#performance)). |
 | `vllm-qwen-flashnext` | Qwen3.8-Flash-Next (GDN-hybrid/MoE, `qwen4_exp`) | 8001 | Trying the newer Flash-Next model. Built from a separate, newer vLLM head (`Dockerfile.flashnext`) that carries `qwen4_exp` support not yet in the main pin. Currently affected by an unresolved reasoning-loop issue under agentic/long-context use (see the `flashnext-vllm` container's own notes/commits) — treat as experimental. |
 | `vllm-radiance`       | Qwen3.8-27B-FP8 (same model as `vllm`'s default) | 8002 | A/B-testing raw throughput against `vllm`. Uses a prebuilt, gfx1201-hand-tuned community image (`stilldeadcode/vllm-radiance`) with custom kernels (R4D); no image build required (`docker pull` only), but not built/patched by this repo so it can't pick up local fixes. Validated at TP=4 with a clear performance win over TP=2 (see `benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md`). |
-| `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm:dev`); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; the 125.8 GB checkpoint lives at `/srv/llm/tcclaviger/…` (download once with `hf download` — `just up-mxfp4` refuses to start until it's there). |
+| `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm`, **pinned by digest** via `MXFP4_VLLM_REF` — the `dev` tag it used to follow is mutable and has been rebuilt under us); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; the 125.8 GB checkpoint lives at `/srv/llm/tcclaviger/…` (download once with `hf download` — `just up-mxfp4` refuses to start until it's there). |
+| `vllm-gptq`           | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ ("AA2": activation-aware MXFP4 experts + int6 n-gram PLE table — better PPL/top-1 than `vllm-mxfp4`'s checkpoint) | 8004 | The same model at better quality, needs a **newer image** than `vllm-mxfp4` (the int6 PLE table won't load on the pinned build), which is why it is its own service: switching quantization is `just down-mxfp4 && just up-gptq`, with no compose edit and no cache clear (each service has its own cache suffix). Pulls the newest `29.02.1` build on every start (`pull_policy: always`). Config comes from the model card's TP4 example — the image ships no confirmed TP4 or GPTQ recipe, so treat it as experimental; see the driver-env note in `.env.example` before enabling `GPU_MAX_HW_QUEUES`/`HSA_ENABLE_*`. |
 
 Starting/stopping each:
 
@@ -159,8 +162,11 @@ just compose down vllm-qwen-flashnext        # stop it
 just up-radiance       # start `vllm-radiance` (no build needed, image is pulled)
 just down-radiance      # stop it
 
-just up-mxfp4          # start `vllm-mxfp4` (no build needed, image is pulled)
+just up-mxfp4          # start `vllm-mxfp4` (no build needed; image is pinned by digest)
 just down-mxfp4        # stop it
+
+just up-gptq           # start `vllm-gptq` (re-resolves the GPTQ_VLLM_TAG image first)
+just down-gptq         # stop it
 ```
 
 If you deliberately want two of these running side by side (e.g. briefly,
