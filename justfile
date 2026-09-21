@@ -344,19 +344,18 @@ up-radiance: check
 down-radiance:
     @{{compose}} down vllm-radiance
 
-# Start the vllm-mxfp4 service (Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ via the
-# prebuilt tcclaviger/vllm:dev image — no build step, just `docker pull`). TP=4
-# wants all four GPUs and the int6 PLE table pins host RAM, so it is not
+# Start the vllm-mxfp4 service (Qwen3.8-Flash-Next-MXFP4-FP8 via the prebuilt
+# tcclaviger/vllm:dev image — no build step, just `docker pull`). TP=4 wants
+# all four GPUs and the PLE table pins ~110 GiB of host RAM, so it is not
 # intended to run concurrently with `vllm`/`vllm-qwen-flashnext`/`vllm-radiance`.
 up-mxfp4: check
     #!/usr/bin/env bash
     set -euo pipefail
-    mxfp4_model="$(grep -m1 '^MXFP4_MODEL_DIR=' .env 2>/dev/null | cut -d= -f2- || true)"
-    mxfp4_model="${mxfp4_model:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}"
+    mxfp4_model="/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8"
     if [ ! -f "$mxfp4_model/model.safetensors.index.json" ]; then
       printf 'error: model not found at %s\n' "$mxfp4_model" >&2
-      printf 'Download it first (~116 GB, resumable):\n' >&2
-      printf '  hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \\\n' >&2
+      printf 'Download it first (125.8 GB, resumable):\n' >&2
+      printf '  hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8 \\\n' >&2
       printf '    --local-dir %s\n' "$mxfp4_model" >&2
       exit 1
     fi
@@ -364,7 +363,7 @@ up-mxfp4: check
     mxfp4_port="${mxfp4_port:-8003}"
     {{compose}} up -d vllm-mxfp4
     printf 'vllm-mxfp4 starting at http://localhost:%s/v1 (fresh image —\n' "$mxfp4_port"
-    printf 'first boot loads the ~116 GB checkpoint from /srv/llm and compiles\n'
+    printf 'first boot loads the 125.8 GB checkpoint from /srv/llm and compiles\n'
     printf 'Triton/inductor kernels; check readiness with `just logs vllm-mxfp4` or\n'
     printf '`just compose ps`).\n'
 
