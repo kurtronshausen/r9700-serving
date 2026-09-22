@@ -1,0 +1,88 @@
+ARG ROCM_IMAGE
+ARG GPU_ARCH=gfx1201
+
+# Standalone image-generation service: the Qwen-Image-2.1 diffusers pipeline
+# behind a minimal FastAPI wrapper (tools/image_gen_server.py). This is NOT
+# vLLM -- it is a text-to-image / image-editing diffusion model (Qwen3-VL-8B
+# text encoder + 7B single-stream DiT + VAE, ~32 GB BF16), so it shares the
+# ROCm/PyTorch base with the LLM services but nothing else.
+#
+# Only the `framework-base` stage of Dockerfile.fullbuild is reproduced here;
+# there is no vLLM, AITER, or flash-attention build. Kept as its own file so
+# building it never touches (or is touched by) the LLM images.
+
+# ---------------------------------------------------------------------------
+# ROCm + Python + PyTorch (mirrors Dockerfile.fullbuild framework-base)
+# ---------------------------------------------------------------------------
+
+FROM ${ROCM_IMAGE} AS base
+
+ARG GPU_ARCH
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ENV GPU_ARCH=${GPU_ARCH}
+ENV ROCM_PATH=/opt/rocm
+ENV PATH=/opt/venv/bin:/opt/rocm/bin:/opt/rocm/llvm/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH}
+ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        libnuma-dev \
+        python3 \
+        python3-dev \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv \
+    && python -m pip install --upgrade pip uv wheel "setuptools>=77,<80"
+
+# AMD's ROCm PyTorch stack for the target GPU -- the same wheel the LLM
+# services use, so gfx1201 kernels are consistent across the whole stack.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    : "${TORCH_VERSION:?set TORCH_VERSION to the pinned torch version}" \
+    && : "${TORCHVISION_VERSION:?set TORCHVISION_VERSION to the pinned torchvision version}" \
+    && python -m pip install \
+        --index-url https://repo.amd.com/rocm/whl-multi-arch/ \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "amd-torch-device-${GPU_ARCH}==${TORCH_VERSION}"
+
+# Diffusion serving deps.
+#   diffusers  : QwenImage21Pipeline / QwenImage21Transformer2DModel were merged
+#                to main on 2026-09-18 (commit 6256aa7666ce, "Add Qwen-Image
+#                2.1"), which is AFTER the last release tag (v0.40.0, 2026-08-20)
+#                -- so the class is in NO tagged release yet. Install from git at
+#                a pinned commit (DIFFUSERS_REF), NOT a PyPI version. Bump to a
+#                release tag once one ships that carries the pipeline.
+#   transformers: must carry Qwen3VLForConditionalGeneration + Qwen3VLProcessor
+#                 (the pipeline's text encoder) -- present since the 4.57 line.
+#   accelerate  : device_map="balanced" sharding across the four GPUs.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    : "${DIFFUSERS_REF:?set DIFFUSERS_REF to a diffusers git commit}" \
+    && : "${TRANSFORMERS_VERSION:?set TRANSFORMERS_VERSION}" \
+    && python -m pip install \
+        "git+https://github.com/huggingface/diffusers.git@${DIFFUSERS_REF}" \
+        "transformers==${TRANSFORMERS_VERSION}" \
+        accelerate \
+        fastapi \
+        "uvicorn[standard]" \
+        safetensors \
+        pillow
+
+RUN python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("ROCm :", torch.version.hip)
+print("gpus :", torch.cuda.device_count())
+PY
+
+# The server reads the checkpoint and tools/ from the host mounts at runtime
+# (see compose.yaml `volumes`), so nothing model-specific is baked here.
+WORKDIR /app
+COPY tools/image_gen_server.py /app/image_gen_server.py
+
+# entrypoint runs uvicorn; --port is passed via the compose `command:`.
+ENTRYPOINT ["uvicorn", "image_gen_server:app", "--host", "0.0.0.0"]

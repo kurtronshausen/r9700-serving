@@ -14,6 +14,7 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just check` | validate the compose config for both model profiles (main + flash-next) |
 | `just build` | build the main Docker image (`vllm` service only) |
 | `just build-flashnext` | build the Qwen3.8-Flash-Next image (Dockerfile.flashnext, `vllm-qwen-flashnext` service) |
+| `just build-imagegen` / `just up-imagegen` | build / start the `image-gen` service — Qwen-Image-2.1 text-to-image via diffusers (Dockerfile.imagegen), the only non-vLLM service; runs one-at-a-time like the rest (its ~32 GB of weights want all four GPUs) |
 | `just rebuild` / `just rebuild-flashnext` | force-rebuild (no cache), main / flashnext image |
 | `just up` | start the main `vllm` service (runs `check`, `ensure-cache-dirs`, `prewarm`, waits for readiness, runs warmup) |
 | `just up-flashnext` | start the `vllm-qwen-flashnext` service (needs `build-flashnext` first) |

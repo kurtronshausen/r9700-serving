@@ -1,14 +1,16 @@
 # vLLM on Radeon AI PRO R9700
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
-configuration targets four R9700s (`gfx1201`) and serves a model through
-vLLM's OpenAI-compatible API. `compose.yaml` defines five independent
-services — `vllm` (dense Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
+configuration targets four R9700s (`gfx1201`). `compose.yaml` defines six
+independent services — five vLLM OpenAI-compatible servers: `vllm` (dense
+Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 (Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
 `vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
-community image), `vllm-mxfp4` and `vllm-gptq` (two quantizations of
+community image), and `vllm-mxfp4` / `vllm-gptq` (two quantizations of
 Qwen3.8-Flash-Next served by the prebuilt `tcclaviger/vllm` community image) —
-each with its own port, model
+plus one non-LLM service, `image-gen` (Qwen-Image-2.1, a text-to-image
+diffusion model served via diffusers, not vLLM). Each
+has its own port, model
 profile, and compile-cache dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to pick one and why they aren't meant to run together).
 
 ## Requirements
@@ -77,7 +79,10 @@ the host port. `vllm-qwen-flashnext` serves at `http://localhost:8001/v1`
 `http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias,
 and `vllm-mxfp4` at `http://localhost:8003/v1` (`MXFP4_PORT`) /
 `llm-mxfp4-backend` alias, and `vllm-gptq` at `http://localhost:8004/v1`
-(`GPTQ_PORT`) / `llm-gptq-backend` alias.
+(`GPTQ_PORT`) / `llm-gptq-backend` alias. The non-LLM `image-gen` service
+(diffusers, not vLLM) listens at `http://localhost:8005` (`IMAGEGEN_PORT`) /
+`llm-imagegen-backend` alias, exposing `POST /generate` (returns a PNG) and an
+OpenAI-shaped `POST /v1/images/generations` (returns base64) for litellm.
 
 ## Configuration
 
@@ -135,10 +140,12 @@ Runtime environment is split across files:
 This host has four GPUs, and every profile here defaults to
 `--tensor-parallel-size 4` (all of them) because that's what benchmarks best
 for each model — there's no small/large split of GPUs to hand out per
-service. That's the practical reason the five services are meant to be run
+service. That's the practical reason the six services are meant to be run
 **one at a time, never concurrently**: two services both wanting all 4 GPUs
 would either fail to allocate VRAM or silently corrupt each other's KV cache
-if forced onto overlapping devices. (`vllm-qwen-flashnext` and `vllm-mxfp4`
+if forced onto overlapping devices. (The non-LLM `image-gen` service is the
+same story from the other direction — its ~32 GB of diffusion weights alone
+fill a whole card, so it too wants all four and can't share.) (`vllm-qwen-flashnext` and `vllm-mxfp4`
 additionally pin ~110 GiB of the *host's* RAM for their n-gram PLE tables —
 another reason not to double up.) Pick one:
 
@@ -149,6 +156,7 @@ another reason not to double up.) Pick one:
 | `vllm-radiance`       | Qwen3.8-27B-FP8 (same model as `vllm`'s default) | 8002 | A/B-testing raw throughput against `vllm`. Uses a prebuilt, gfx1201-hand-tuned community image (`stilldeadcode/vllm-radiance`) with custom kernels (R4D); no image build required (`docker pull` only), but not built/patched by this repo so it can't pick up local fixes. Validated at TP=4 with a clear performance win over TP=2 (see `benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md`). |
 | `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm`, **pinned by digest** via `MXFP4_VLLM_REF` — the `dev` tag it used to follow is mutable and has been rebuilt under us); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; the 125.8 GB checkpoint lives at `/srv/llm/tcclaviger/…` (download once with `hf download` — `just up-mxfp4` refuses to start until it's there). |
 | `vllm-gptq`           | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ ("AA2": activation-aware MXFP4 experts + int6 n-gram PLE table — better PPL/top-1 than `vllm-mxfp4`'s checkpoint) | 8004 | The same model at better quality, needs a **newer image** than `vllm-mxfp4` (the int6 PLE table won't load on the pinned build), which is why it is its own service: switching quantization is `just down-mxfp4 && just up-gptq`, with no compose edit and no cache clear (each service has its own cache suffix). Pulls the newest `29.02.1` build on every start (`pull_policy: always`). Config comes from the model card's TP4 example — the image ships no confirmed TP4 or GPTQ recipe, so treat it as experimental; see the driver-env note in `.env.example` before enabling `GPU_MAX_HW_QUEUES`/`HSA_ENABLE_*`. |
+| `image-gen`           | Qwen-Image-2.1 (text-to-image / image-editing diffusion — Qwen3-VL-8B encoder + 7B DiT + VAE, **not** an LLM) | 8005 | The one non-vLLM service: served by the diffusers `QwenImage21Pipeline` behind a thin FastAPI wrapper (`tools/image_gen_server.py`), built by its own `Dockerfile.imagegen` (shares only the ROCm/torch base with the LLM images; `diffusers` is pinned to a git commit — see `.env.example`). The ~32 GB of weights fill a whole card and default to spreading over all four, so it runs one-at-a-time like the rest. **Experimental on gfx1201**: no verified ROCm/RDNA4 report; if a boot faults or emits NaN, try `IMAGEGEN_DTYPE=float32` or `IMAGEGEN_OFFLOAD=sequential`. |
 
 Starting/stopping each:
 
@@ -167,6 +175,13 @@ just down-mxfp4        # stop it
 
 just up-gptq           # start `vllm-gptq` (re-resolves the GPTQ_VLLM_TAG image first)
 just down-gptq         # stop it
+
+just build-imagegen && just up-imagegen     # start `image-gen` (diffusion; build once)
+just down-imagegen     # stop it
+# generate an image once it reports healthy (curl the PNG to a file):
+curl -s localhost:8005/generate -H 'content-type: application/json' \
+  -d '{"prompt":"a red fox in snow, 1:1","width":1328,"height":1328,"steps":40}' \
+  --output out.png
 ```
 
 If you deliberately want two of these running side by side (e.g. briefly,

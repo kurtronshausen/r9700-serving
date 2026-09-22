@@ -124,6 +124,11 @@ clear-vllm-caches:
         "$HOME/.cache/triton_gptq"
         "$HOME/.cache/torchinductor_gptq"
         "$HOME/.cache/aiter_gptq"
+        # image-gen service's compile caches (NOT its HF_HOME — the checkpoint
+        # is a local /srv/llm dir, so HF_HOME holds little and wiping it only
+        # forces re-fetches of tokenizer/processor assets).
+        "$HOME/.cache/triton_imagegen"
+        "$HOME/.cache/torchinductor_imagegen"
     )
 
     printf 'Removing vLLM host cache directories:\n'
@@ -407,6 +412,40 @@ up-gptq: check
 # Stop just the vllm-gptq service (leaves the other services running).
 down-gptq:
     @{{compose}} down vllm-gptq
+
+# Build the image-generation image (Dockerfile.imagegen). Thin: it reuses the
+# ROCm/torch base from Dockerfile.fullbuild's framework-base stage but installs
+# diffusers (from git at DIFFUSERS_REF) + transformers instead of vLLM. Separate
+# image, so building it never rebuilds (or is rebuilt by) the LLM images.
+build-imagegen: check
+    @{{compose}} build image-gen
+
+# Start the image-gen service (Qwen-Image-2.1 text-to-image via diffusers, NOT
+# vLLM). The ~32 GB of weights fill a whole R9700 and the default device_map
+# placement spreads them over all four, so this is not meant to run alongside
+# any LLM service — stop one first (`just down` / `just down-gptq`), same
+# one-at-a-time rule. First boot loads the checkpoint from /srv/llm.
+up-imagegen: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    imagegen_model="$(grep -m1 '^IMAGEGEN_MODEL_DIR=' .env 2>/dev/null | cut -d= -f2- || true)"
+    imagegen_model="${imagegen_model:-/srv/llm/Qwen/Qwen-Image-2.1}"
+    if [ ! -f "$imagegen_model/model_index.json" ]; then
+      printf 'error: model not found at %s\n' "$imagegen_model" >&2
+      printf 'Download it first (33.1 GB, resumable):\n' >&2
+      printf '  hf download Qwen/Qwen-Image-2.1 --local-dir %s\n' "$imagegen_model" >&2
+      exit 1
+    fi
+    imagegen_port="$(grep -m1 '^IMAGEGEN_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    imagegen_port="${imagegen_port:-8005}"
+    {{compose}} up -d image-gen
+    printf 'image-gen starting at http://localhost:%s/generate (and /v1/images/generations).\n' "$imagegen_port"
+    printf 'First boot loads ~32 GB of weights across the GPUs; poll readiness with\n'
+    printf '`just logs image-gen` (GET /health returns 503 until the pipeline is resident).\n'
+
+# Stop just the image-gen service (leaves the other services running).
+down-imagegen:
+    @{{compose}} down image-gen
 
 # Run a command inside the running vLLM container (e.g. `just exec bash`).
 exec *args:
