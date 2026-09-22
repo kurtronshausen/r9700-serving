@@ -405,10 +405,12 @@ services:
       # CUDA graphs without torch.compile: decode-only capture (his example's
       # sizes list; mode stays eager).
       - '--compilation-config={"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"max_cudagraph_capture_size":32}'
-      # YaRN 2x rope extension: the model's native context is 262144; the
-      # card's --max-model-len 524288 example relies on this to extrapolate.
-      # Kept so MXFP4_MAX_MODEL_LEN can be bumped to 524288 without a
-      # config change.
+      # YaRN rope extension: the model's native context is 262144 and the
+      # card's 524288 example relies on this to extrapolate. NOTE: vLLM
+      # derives its max_model_len cap from max_position_embeddings, not from
+      # this factor, so raising MXFP4_MAX_MODEL_LEN past 262144 also needs
+      # VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 (see vllm-gptq below). Left in place
+      # because the pinned image accepts it; harmless at 262144.
       - '--hf-overrides={"text_config":{"rope_parameters":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":262144,"mrope_section":[11,11,10],"mrope_interleaved":true,"partial_rotary_factor":0.25,"rope_theta":10000000}}}'
       - --tool-call-parser=qwen3_coder
       - --enable-auto-tool-choice
@@ -514,11 +516,15 @@ services:
       # MXFP4-pack + int6 PLE) — no --quantization flag. fp8 KV: the
       # checkpoint ships calibrated KV scales, as with vllm-mxfp4.
       - --kv-cache-dtype=fp8
-      # Card TP4 example runs 524288 via the YaRN --hf-overrides below (native
-      # context is 262144). Doubling the context doubles the worst-case KV
-      # reservation per request, so drop to 262144 via GPTQ_MAX_MODEL_LEN if
-      # concurrency suffers KV pressure.
-      - --max-model-len=${GPTQ_MAX_MODEL_LEN:-524288}
+      # 262144 is the model's native context (max_position_embeddings) and
+      # what every recipe bundled in the image runs. The card's TP4 example
+      # passes 524288 relying on the YaRN --hf-overrides below, but newer
+      # images derive the cap from max_position_embeddings and REJECT it
+      # unless VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 is set (that env is a
+      # deliberate opt-in to positions past the trained window -- not set
+      # here). Bump GPTQ_MAX_MODEL_LEN to 524288 only together with that env;
+      # note it also doubles the worst-case KV reservation per request.
+      - --max-model-len=${GPTQ_MAX_MODEL_LEN:-262144}
       # 0.97 per the card example. The pool is sized AFTER CUDA-graph capture,
       # so a lower value here silently costs KV tokens (vllm prints the
       # equivalent utilization it actually used).
