@@ -466,16 +466,21 @@ services:
   # int6 (41.6 GB vs 51.3 GB FP8) and uses activation-aware MXFP4 experts,
   # for better PPL/top-1 than the MXFP4-FP8 checkpoint `vllm-mxfp4` serves.
   #
-  # Image: resolved by TAG with `pull_policy: always`, because this checkpoint
-  # needs a newer image than the pinned one above and we want the newest build
-  # on every start. Use the version tag, NOT `latest`: on 2026-09-21 `latest`
-  # still resolves to a 2026-09-14 build while `29.02.1` (== today's `dev`) is
-  # 7 days newer. Set GPTQ_VLLM_REF to a digest to freeze this service too.
+  # Image: resolved by TAG with `pull_policy: always`. Use an explicit version
+  # tag, NOT `latest` or `dev` (both mutable).
+  #
+  # PINNED TO 29.02.1 on purpose -- newer tags FAIL to boot on this host.
+  # 29.04.9 / `latest` (vllm 0.29.0.dev0) pins the PLE table with
+  # cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm box even with
+  # memlock unlimited (crash line: "vmlck=0kB ... registered=0MiB"), so every
+  # worker dies at init. 29.02.1 (also vllm 0.29.0.dev0, different build) uses
+  # the ROCr VMM / ipc_export path that works here. Before bumping this tag,
+  # verify a PLE boot succeeds; do NOT assume newer = working.
   #
   # The serve config below comes from the GPTQ model card's TP4 example, not
-  # from `--recipes`: as of 29.02.1 every bundled recipe is TP2 on the
-  # MXFP4-FP8 checkpoint, so there is no confirmed TP4 or GPTQ configuration
-  # to copy. Treat this service as experimental.
+  # from `--recipes`: every recipe bundled as of the last check was TP2 on the
+  # MXFP4-FP8 checkpoint, so there is no confirmed TP4 or GPTQ configuration to
+  # copy. Treat this service as experimental.
   #
   # Driver-tuning env from the card example (GPU_MAX_HW_QUEUES=1,
   # HSA_ENABLE_INTERRUPT=1, HSA_ENABLE_MWAITX=1) is deliberately NOT set here:
