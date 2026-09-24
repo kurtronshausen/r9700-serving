@@ -525,10 +525,16 @@ services:
       # here). Bump GPTQ_MAX_MODEL_LEN to 524288 only together with that env;
       # note it also doubles the worst-case KV reservation per request.
       - --max-model-len=${GPTQ_MAX_MODEL_LEN:-262144}
-      # 0.97 per the card example. The pool is sized AFTER CUDA-graph capture,
-      # so a lower value here silently costs KV tokens (vllm prints the
-      # equivalent utilization it actually used).
-      - --gpu-memory-utilization=${GPTQ_GPU_UTIL:-0.97}
+      # 0.92, matching vllm-mxfp4 — NOT the card example's 0.97. vLLM sizes the
+      # KV pool as (util*VRAM - weights), subtracting ONLY weights, so 0.97
+      # reserved 6.39 GiB of KV and left no room for the 1.06 GiB activation +
+      # 0.66 GiB CUDA-graph footprint it measured: weights+KV+act+graphs came
+      # to ~32.6 GiB against ~31.2 GiB physically free, so a large-context
+      # prefill (seen at ~157k tokens) hit "0 bytes free" OOM. 0.92 brings the
+      # reservation to ~4.8 GiB — vLLM's own "fully utilize" figure — so the
+      # total fits with activation headroom. The pool is sized AFTER CUDA-graph
+      # capture; this trades a little on-paper KV for not OOMing under load.
+      - --gpu-memory-utilization=${GPTQ_GPU_UTIL:-0.92}
       - --max-num-seqs=${GPTQ_MAX_NUM_SEQS:-16}
       - --max-num-batched-tokens=${GPTQ_MAX_NUM_BATCHED_TOKENS:-8192}
       - --enable-prefix-caching
@@ -562,6 +568,12 @@ services:
       # int6 n-gram PLE table pinned in host RAM (~116 GB total footprint).
       - VLLM_PLE_CPU_OFFLOAD=1
       - OMP_NUM_THREADS=${GPTQ_OMP_NUM_THREADS:-8}
+      # Reduce torch allocator fragmentation. The OOM that dropped util to 0.92
+      # showed 760 MiB reserved-but-unallocated — variable-size activations
+      # across long-context prefills fragment the pool; expandable segments let
+      # torch grow/shrink VAs instead of stranding holes. Complements the util
+      # fix; neither alone is sufficient.
+      - PYTORCH_CUDA_ALLOC_CONF=${GPTQ_PYTORCH_ALLOC_CONF:-expandable_segments:True}
       # Own cache suffix — NOT shared with vllm-mxfp4. These caches key on
       # the checkpoint, so two checkpoints in one dir corrupt each other's
       # compiled kernels. They are root-owned (this image runs as root), so
