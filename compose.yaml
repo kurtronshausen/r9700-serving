@@ -468,15 +468,14 @@ services:
   #
   # Image: resolved by TAG with `pull_policy: always`, because this checkpoint
   # needs a newer image than the pinned one above and we want the newest build
-  # on every start. Use an explicit version tag, NOT `latest` or `dev` — both
-  # are mutable and `latest` has lagged the newest build before. Bump the tag
-  # in .env (GPTQ_VLLM_TAG) or here to move to a newer build.
+  # on every start. Use the version tag, NOT `latest`: on 2026-09-21 `latest`
+  # still resolves to a 2026-09-14 build while `29.02.1` (== today's `dev`) is
+  # 7 days newer. Set GPTQ_VLLM_REF to a digest to freeze this service too.
   #
   # The serve config below comes from the GPTQ model card's TP4 example, not
-  # from `--recipes`: every recipe bundled as of the last check was TP2 on the
-  # MXFP4-FP8 checkpoint, so there is no confirmed TP4 or GPTQ configuration to
-  # copy (re-check on a tag bump with `docker run --rm tcclaviger/vllm:<tag>
-  # --recipes`). Treat this service as experimental.
+  # from `--recipes`: as of 29.02.1 every bundled recipe is TP2 on the
+  # MXFP4-FP8 checkpoint, so there is no confirmed TP4 or GPTQ configuration
+  # to copy. Treat this service as experimental.
   #
   # Driver-tuning env from the card example (GPU_MAX_HW_QUEUES=1,
   # HSA_ENABLE_INTERRUPT=1, HSA_ENABLE_MWAITX=1) is deliberately NOT set here:
@@ -486,7 +485,7 @@ services:
   vllm-gptq:
     <<: *amd_devices
     pull_policy: always
-    image: docker.io/tcclaviger/vllm:${GPTQ_VLLM_TAG:-29.04.9}
+    image: docker.io/tcclaviger/vllm:${GPTQ_VLLM_TAG:-29.02.1}
     container_name: vllm-gptq
     restart: unless-stopped
     ports:
