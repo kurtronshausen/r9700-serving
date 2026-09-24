@@ -568,12 +568,13 @@ services:
       # int6 n-gram PLE table pinned in host RAM (~116 GB total footprint).
       - VLLM_PLE_CPU_OFFLOAD=1
       - OMP_NUM_THREADS=${GPTQ_OMP_NUM_THREADS:-8}
-      # Reduce torch allocator fragmentation. The OOM that dropped util to 0.92
-      # showed 760 MiB reserved-but-unallocated — variable-size activations
-      # across long-context prefills fragment the pool; expandable segments let
-      # torch grow/shrink VAs instead of stranding holes. Complements the util
-      # fix; neither alone is sufficient.
-      - PYTORCH_CUDA_ALLOC_CONF=${GPTQ_PYTORCH_ALLOC_CONF:-expandable_segments:True}
+      # Do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True here, even
+      # though the OOM message suggests it: VLLM_PLE_CPU_OFFLOAD exports its
+      # host-pinned buffer over ROCr IPC, and expandable_segments allocates via
+      # VMM, which ipc_export rejects ("pointer is not a plain ROCr allocation,
+      # type=6") — the engine then fails to start. The util=0.92 default above
+      # is the whole fix; it removes the ~1.6 GiB over-commit that dwarfs the
+      # ~760 MiB fragmentation, and matches the proven-stable vllm-mxfp4.
       # Own cache suffix — NOT shared with vllm-mxfp4. These caches key on
       # the checkpoint, so two checkpoints in one dir corrupt each other's
       # compiled kernels. They are root-owned (this image runs as root), so
