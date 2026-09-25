@@ -634,12 +634,12 @@ services:
   # all four cards).
   #
   # DRIVER ENV: his recipe sets GPU_MAX_HW_QUEUES=1 / HSA_ENABLE_INTERRUPT=1 /
-  # HSA_ENABLE_MWAITX=1. CAUTION: on this host that trio was present for the only
-  # `amdgpu` MES unrecoverable + failed GPU reset that hard-hung the box (see
-  # vllm-gptq). They are therefore commented out below -- NOT applied by default,
-  # so this service does not run his exact config until you uncomment all three.
-  # Uncomment them together to match him for the true reproduction, but know the
-  # hang risk is real.
+  # HSA_ENABLE_MWAITX=1, and they are ENABLED below so this runs his exact config.
+  # CAUTION: on this host that trio was present for the only `amdgpu` MES
+  # unrecoverable + failed GPU reset that hard-hung the box (see vllm-gptq). If
+  # the host hangs on bringup, a hard reboot clears it; the fix is to comment all
+  # three back out (they are the only deviation from his recipe that carries a
+  # real hang risk).
   vllm-gptq-aa:
     <<: *amd_devices
     pull_policy: always
@@ -721,11 +721,13 @@ services:
       - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_gptqaa
       - TRITON_CACHE_DIR=${HOME}/.cache/triton_gptqaa
       - AITER_ROOT_DIR=${HOME}/.cache/aiter_gptqaa
-      # Driver env from his recipe, commented for the MES-hang caveat above.
-      # Uncomment ALL THREE together for the exact reproduction.
-      # - GPU_MAX_HW_QUEUES=1
-      # - HSA_ENABLE_INTERRUPT=1
-      # - HSA_ENABLE_MWAITX=1
+      # Driver env from his recipe -- ENABLED for the exact reproduction. This
+      # trio was present for the only amdgpu MES unrecoverable + failed GPU reset
+      # that hard-hung the box (see vllm-gptq); if the host hangs on bringup, a
+      # hard reboot clears it and the fix is to comment all three back out.
+      - GPU_MAX_HW_QUEUES=1
+      - HSA_ENABLE_INTERRUPT=1
+      - HSA_ENABLE_MWAITX=1
     volumes:
       - ./chat-templates/:/app/chat-templates
       - ${HOME}:${HOME}
