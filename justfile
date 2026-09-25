@@ -418,13 +418,14 @@ up-gptq: check
 down-gptq:
     @{{compose}} down vllm-gptq
 
-# Start the vllm-gptq-aa service — tcclaviger's own TP4 recipe for the "AA"
+# Start the vllm-gptq-aa service — tcclaviger's own TP4 recipe for the "AA2"
 # GPTQ build, reproduced as faithfully as possible on his current image, so any
 # issue can be quoted back to him verbatim. It resolves the QFN_AA_VLLM_TAG
-# image by tag with pull_policy: always, so every start re-pulls that tag. Unlike
-# vllm-gptq it does NOT set VLLM_PLE_CPU_OFFLOAD (the new image's cudaHostRegister
-# pinning fails on this host; PLE stays in VRAM at TP4), so it does not pin ~116
-# GiB of host RAM — but it still wants all four GPUs, so one service at a time.
+# image by tag with pull_policy: always, so every start re-pulls that tag.
+# VLLM_PLE_CPU_OFFLOAD is gone from this image; PLE placement is now the
+# --engram-config default (cpu_offload=true), so the PLE table is still pinned
+# in host RAM (~116 GiB) as with vllm-gptq, and it wants all four GPUs — one
+# service at a time.
 up-gptq-aa: check
     #!/usr/bin/env bash
     set -euo pipefail

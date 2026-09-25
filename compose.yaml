@@ -469,13 +469,15 @@ services:
   # Image: resolved by TAG with `pull_policy: always`. Use an explicit version
   # tag, NOT `latest` or `dev` (both mutable).
   #
-  # PINNED TO 29.02.1 on purpose -- newer tags FAIL to boot on this host.
-  # 29.04.9 / `latest` (vllm 0.29.0.dev0) pins the PLE table with
-  # cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm box even with
-  # memlock unlimited (crash line: "vmlck=0kB ... registered=0MiB"), so every
-  # worker dies at init. 29.02.1 (also vllm 0.29.0.dev0, different build) uses
-  # the ROCr VMM / ipc_export path that works here. Before bumping this tag,
-  # verify a PLE boot succeeds; do NOT assume newer = working.
+  # PINNED TO 29.02.1 on purpose -- the 29.04.9-era builds FAIL to boot on this
+  # host. That build pins the PLE table with cudaHostRegister, which registers 0
+  # bytes on this RDNA4/ROCm box even with memlock unlimited (crash line:
+  # "vmlck=0kB ... registered=0MiB"), so every worker dies at init. 29.02.1
+  # (also vllm 0.29.0.dev0, different build) uses the ROCr VMM / ipc_export path
+  # that works here. 29.04.15 dropped the cudaHostRegister path for a UVA pin
+  # (see vllm-gptq-aa), so it may boot -- but that is untested, and this service
+  # stays on the known-good 29.02.1. Before bumping this tag, verify a PLE boot
+  # succeeds; do NOT assume newer = working.
   #
   # The serve config below comes from the GPTQ model card's TP4 example, not
   # from `--recipes`: every recipe bundled as of the last check was TP2 on the
@@ -616,23 +618,28 @@ services:
   # so a mismatch is never silent. It is a SEPARATE service from `vllm-gptq`
   # (which stays pinned to 29.02.1 + CPU-offload as the known-good fallback).
   #
-  # WHY THIS BOOTS WHERE THE 29.04.9 EXPERIMENT DID NOT: his recipe does NOT set
-  # VLLM_PLE_CPU_OFFLOAD. On the new image that env makes the worker pin the PLE
-  # table with cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm box
-  # (crash: "vmlck=0kB registered=0MiB") and kills every worker. Omitting it
-  # leaves the int6 PLE table in VRAM at TP4 -- no host-pinning, no crash. That
-  # single omission is the fix, not a tag change.
+  # PLE PLACEMENT: VLLM_PLE_CPU_OFFLOAD does not exist in this image; placement
+  # is config-driven via --engram-config, whose cpu_offload defaults to true --
+  # pinned host RAM + UVA gather. Neither his recipe nor this service sets it,
+  # so the int6 PLE table stays in host RAM, exactly as with vllm-gptq.
   #
-  # RAM: without CPU-offload the PLE table is NOT pinned in host RAM, so this
-  # drops the ~110 GiB memlock footprint of vllm-gptq. One-at-a-time still
-  # applies (TP4, all four cards).
+  # WHY THIS MAY BOOT WHERE THE 29.04.9 EXPERIMENT DID NOT: 29.04.9 pinned that
+  # host RAM with cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm
+  # box ("vmlck=0kB registered=0MiB") and kills every worker. This build's
+  # default path is the UVA/ROCr-VMM one that works here (same mechanism as
+  # 29.02.1). UNTESTED on this host -- 29.04.15 has not been brought up yet.
+  #
+  # RAM: the PLE table is still pinned in host RAM, so the ~110 GiB memlock
+  # footprint of vllm-gptq applies here too. One-at-a-time still applies (TP4,
+  # all four cards).
   #
   # DRIVER ENV: his recipe sets GPU_MAX_HW_QUEUES=1 / HSA_ENABLE_INTERRUPT=1 /
-  # HSA_ENABLE_MWAITX=1, so they are set here for fidelity. CAUTION: on this
-  # host that trio was present for the only `amdgpu` MES unrecoverable + failed
-  # GPU reset that hard-hung the box (see vllm-gptq). They are commented out
-  # below by default -- uncomment all three to match him exactly if you want the
-  # true reproduction, but know the hang risk is real.
+  # HSA_ENABLE_MWAITX=1. CAUTION: on this host that trio was present for the only
+  # `amdgpu` MES unrecoverable + failed GPU reset that hard-hung the box (see
+  # vllm-gptq). They are therefore commented out below -- NOT applied by default,
+  # so this service does not run his exact config until you uncomment all three.
+  # Uncomment them together to match him for the true reproduction, but know the
+  # hang risk is real.
   vllm-gptq-aa:
     <<: *amd_devices
     pull_policy: always
@@ -646,8 +653,8 @@ services:
         aliases:
           - llm-gptq-aa-backend
     ulimits:
-      # His recipe raises memlock; kept even though PLE is not CPU-pinned here,
-      # so the launch matches his `ulimits memlock -1` exactly.
+      # His recipe raises memlock; needed here regardless, since the PLE table
+      # is pinned host RAM, and it matches his `ulimits memlock -1` exactly.
       memlock:
         soft: -1
         hard: -1
@@ -705,9 +712,9 @@ services:
       - ROCR_VISIBLE_DEVICES=${QFN_AA_HIP_VISIBLE_DEVICES:-0,1,2,3}
       - VLLM_ROCM_USE_AITER=0
       - OMP_NUM_THREADS=${QFN_AA_OMP_NUM_THREADS:-8}
-      # NOT set here, on purpose -- this is the whole point. VLLM_PLE_CPU_OFFLOAD
-      # triggers the cudaHostRegister path that fails on this host with the new
-      # image. His recipe omits it; so does this. See the service comment.
+      # VLLM_PLE_CPU_OFFLOAD is gone from this image; PLE placement is the
+      # --engram-config default (cpu_offload=true, host RAM + UVA gather). His
+      # recipe sets neither, so this service sets neither. See the service comment.
       # Own cache suffix -- NOT shared with vllm-gptq/mxfp4 (caches key on the
       # checkpoint + build; root-owned since this image runs as root).
       - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_gptqaa
