@@ -1,13 +1,14 @@
 # vLLM on Radeon AI PRO R9700
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
-configuration targets four R9700s (`gfx1201`). `compose.yaml` defines six
-independent services — five vLLM OpenAI-compatible servers: `vllm` (dense
+configuration targets four R9700s (`gfx1201`). `compose.yaml` defines seven
+independent services — six vLLM OpenAI-compatible servers: `vllm` (dense
 Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 (Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
 `vllm-radiance` (Qwen3.8-27B-FP8 served by a prebuilt, gfx1201-optimized
-community image), and `vllm-mxfp4` / `vllm-gptq` (two quantizations of
-Qwen3.8-Flash-Next served by the prebuilt `tcclaviger/vllm` community image) —
+community image), and `vllm-mxfp4` / `vllm-gptq` / `vllm-gptq-aa` (quantizations
+of Qwen3.8-Flash-Next served by the prebuilt `tcclaviger/vllm` community image;
+`vllm-gptq-aa` is a faithful reproduction of tcclaviger's own TP4 recipe) —
 plus one non-LLM service, `image-gen` (Qwen-Image-2.1, a text-to-image
 diffusion model served via diffusers, not vLLM). Each
 has its own port, model
@@ -79,7 +80,10 @@ the host port. `vllm-qwen-flashnext` serves at `http://localhost:8001/v1`
 `http://localhost:8002/v1` (`RADIANCE_PORT`) / `llm-radiance-backend` alias,
 and `vllm-mxfp4` at `http://localhost:8003/v1` (`MXFP4_PORT`) /
 `llm-mxfp4-backend` alias, and `vllm-gptq` at `http://localhost:8004/v1`
-(`GPTQ_PORT`) / `llm-gptq-backend` alias. The non-LLM `image-gen` service
+(`GPTQ_PORT`) / `llm-gptq-backend` alias, and `vllm-gptq-aa` at
+`http://localhost:8006/v1` (`QFN_AA_PORT`) / `llm-gptq-aa-backend` alias (the
+same checkpoint, but a faithful reproduction of tcclaviger's own TP4 recipe on
+his current image — see the service comment in `compose.yaml`). The non-LLM `image-gen` service
 (diffusers, not vLLM) listens at `http://localhost:8005` (`IMAGEGEN_PORT`) /
 `llm-imagegen-backend` alias, exposing `POST /generate` (returns a PNG) and an
 OpenAI-shaped `POST /v1/images/generations` (returns base64) for litellm.
@@ -140,14 +144,15 @@ Runtime environment is split across files:
 This host has four GPUs, and every profile here defaults to
 `--tensor-parallel-size 4` (all of them) because that's what benchmarks best
 for each model — there's no small/large split of GPUs to hand out per
-service. That's the practical reason the six services are meant to be run
+service. That's the practical reason the seven services are meant to be run
 **one at a time, never concurrently**: two services both wanting all 4 GPUs
 would either fail to allocate VRAM or silently corrupt each other's KV cache
 if forced onto overlapping devices. (The non-LLM `image-gen` service is the
 same story from the other direction — its ~32 GB of diffusion weights alone
-fill a whole card, so it too wants all four and can't share.) (`vllm-qwen-flashnext` and `vllm-mxfp4`
-additionally pin ~110 GiB of the *host's* RAM for their n-gram PLE tables —
-another reason not to double up.) Pick one:
+fill a whole card, so it too wants all four and can't share.) (`vllm-qwen-flashnext`, `vllm-mxfp4`, and `vllm-gptq`
+additionally pin ~110 GiB of the *host's* RAM for their n-gram PLE tables via
+`VLLM_PLE_CPU_OFFLOAD` — another reason not to double up; `vllm-gptq-aa` does
+*not*, it keeps the PLE table in VRAM.) Pick one:
 
 | service               | model                       | port (default) | when to use |
 |:----------------------|:-----------------------------|:---------------:|:------------|
@@ -156,6 +161,7 @@ another reason not to double up.) Pick one:
 | `vllm-radiance`       | Qwen3.8-27B-FP8 (same model as `vllm`'s default) | 8002 | A/B-testing raw throughput against `vllm`. Uses a prebuilt, gfx1201-hand-tuned community image (`stilldeadcode/vllm-radiance`) with custom kernels (R4D); no image build required (`docker pull` only), but not built/patched by this repo so it can't pick up local fixes. Validated at TP=4 with a clear performance win over TP=2 (see `benchmarks/2026-08-30_qwen3.8-27b_radiance_tp2_bench.md`). |
 | `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm`, **pinned by digest** via `MXFP4_VLLM_REF` — the `dev` tag it used to follow is mutable and has been rebuilt under us); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; the 125.8 GB checkpoint lives at `/srv/llm/tcclaviger/…` (download once with `hf download` — `just up-mxfp4` refuses to start until it's there). |
 | `vllm-gptq`           | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ ("AA2": activation-aware MXFP4 experts + int6 n-gram PLE table — better PPL/top-1 than `vllm-mxfp4`'s checkpoint) | 8004 | The same model at better quality, needs a **newer image** than `vllm-mxfp4` (the int6 PLE table won't load on the pinned build), which is why it is its own service: switching quantization is `just down-mxfp4 && just up-gptq`, with no compose edit and no cache clear (each service has its own cache suffix). Pulls the newest `29.02.1` build on every start (`pull_policy: always`). Config comes from the model card's TP4 example — the image ships no confirmed TP4 or GPTQ recipe, so treat it as experimental; see the driver-env note in `.env.example` before enabling `GPU_MAX_HW_QUEUES`/`HSA_ENABLE_*`. |
+| `vllm-gptq-aa`        | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ (same checkpoint as `vllm-gptq`) | 8006 | tcclaviger's **own TP4 recipe**, reproduced as faithfully as this repo's plumbing allows on his current image (`29.04.15` == `dev`), so a problem can be quoted back to him verbatim. Unlike `vllm-gptq` it sets **no `VLLM_PLE_CPU_OFFLOAD`** — on the new image that env's `cudaHostRegister` pinning registers 0 bytes on this host and kills the workers, so keeping the PLE table in VRAM at TP4 is what makes his recipe boot here. Other differences: `--max-model-len 524288` (via a raised `max_position_embeddings`, the legitimate path), cudagraph size `[5]`, MTP 4 tokens, temp 0.6/top_k 20, no chat-template override. Each deviation is annotated in the `compose.yaml` service comment. |
 | `image-gen`           | Qwen-Image-2.1 (text-to-image / image-editing diffusion — Qwen3-VL-8B encoder + 7B DiT + VAE, **not** an LLM) | 8005 | The one non-vLLM service: served by the diffusers `QwenImage21Pipeline` behind a thin FastAPI wrapper (`tools/image_gen_server.py`), built by its own `Dockerfile.imagegen` (shares only the ROCm/torch base with the LLM images; `diffusers` is pinned to a git commit — see `.env.example`). The ~32 GB of weights fill a whole card and default to spreading over all four, so it runs one-at-a-time like the rest. **Experimental on gfx1201**: no verified ROCm/RDNA4 report; if a boot faults or emits NaN, try `IMAGEGEN_DTYPE=float32` or `IMAGEGEN_OFFLOAD=sequential`. |
 
 Starting/stopping each:
@@ -175,6 +181,9 @@ just down-mxfp4        # stop it
 
 just up-gptq           # start `vllm-gptq` (re-resolves the GPTQ_VLLM_TAG image first)
 just down-gptq         # stop it
+
+just up-gptq-aa        # start `vllm-gptq-aa` (tcclaviger's TP4 recipe, re-pulls QFN_AA_VLLM_TAG)
+just down-gptq-aa      # stop it
 
 just build-imagegen && just up-imagegen     # start `image-gen` (diffusion; build once)
 just down-imagegen     # stop it

@@ -609,6 +609,126 @@ services:
       # compiles Triton/inductor kernels from scratch into empty caches.
       start_period: 1800s
 
+  # tcclaviger's own TP4 recipe for the Qwen3.8-Flash-Next "AA" GPTQ build,
+  # reproduced as faithfully as this repo's plumbing allows, on his current
+  # image (29.04.15 == dev == latest). The point is a config you can quote back
+  # to him on discord verbatim; every intentional deviation is called out below
+  # so a mismatch is never silent. It is a SEPARATE service from `vllm-gptq`
+  # (which stays pinned to 29.02.1 + CPU-offload as the known-good fallback).
+  #
+  # WHY THIS BOOTS WHERE THE 29.04.9 EXPERIMENT DID NOT: his recipe does NOT set
+  # VLLM_PLE_CPU_OFFLOAD. On the new image that env makes the worker pin the PLE
+  # table with cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm box
+  # (crash: "vmlck=0kB registered=0MiB") and kills every worker. Omitting it
+  # leaves the int6 PLE table in VRAM at TP4 -- no host-pinning, no crash. That
+  # single omission is the fix, not a tag change.
+  #
+  # RAM: without CPU-offload the PLE table is NOT pinned in host RAM, so this
+  # drops the ~110 GiB memlock footprint of vllm-gptq. One-at-a-time still
+  # applies (TP4, all four cards).
+  #
+  # DRIVER ENV: his recipe sets GPU_MAX_HW_QUEUES=1 / HSA_ENABLE_INTERRUPT=1 /
+  # HSA_ENABLE_MWAITX=1, so they are set here for fidelity. CAUTION: on this
+  # host that trio was present for the only `amdgpu` MES unrecoverable + failed
+  # GPU reset that hard-hung the box (see vllm-gptq). They are commented out
+  # below by default -- uncomment all three to match him exactly if you want the
+  # true reproduction, but know the hang risk is real.
+  vllm-gptq-aa:
+    <<: *amd_devices
+    pull_policy: always
+    image: docker.io/tcclaviger/vllm:${QFN_AA_VLLM_TAG:-29.04.15}
+    container_name: vllm-gptq-aa
+    restart: unless-stopped
+    ports:
+      - "${QFN_AA_PORT:-8006}:8080"
+    networks:
+      default:
+        aliases:
+          - llm-gptq-aa-backend
+    ulimits:
+      # His recipe raises memlock; kept even though PLE is not CPU-pinned here,
+      # so the launch matches his `ulimits memlock -1` exactly.
+      memlock:
+        soft: -1
+        hard: -1
+    command:
+      # Deviation (plumbing): his recipe uses a generic `/app/models` path; here
+      # the checkpoint lives under /srv/llm (repo convention: big models never
+      # in ~/.cache). This dir currently holds the AA1 download; the hub repo
+      # was updated in place to AA2 (better PPL/top-1) -- re-download for AA2:
+      #   hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \
+      #     --local-dir /srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ
+      - ${QFN_AA_MODEL_DIR:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}
+      - --tensor-parallel-size=${QFN_AA_TP:-4}
+      - --served-model-name=${QFN_AA_SERVED_NAME:-Qwen3.8-Flash-Next-AA}
+      - --kv-cache-dtype=fp8
+      # 524288 is set the legitimate way here (his recipe): max_position_embeddings
+      # is raised to 524288 in --hf-overrides below, so vLLM derives the cap and
+      # does NOT need VLLM_ALLOW_LONG_MAX_MODEL_LEN. Doubles worst-case KV per
+      # request vs the 262144 native window.
+      - --max-model-len=${QFN_AA_MAX_MODEL_LEN:-524288}
+      # 0.97 per his recipe. NOTE: this is the value that over-committed
+      # vllm-gptq's KV at 262144; at 524288 + no CPU-offload the accounting
+      # differs, so it is left at his number for fidelity. If it OOMs under
+      # long-context load, this is the first knob to drop (toward 0.92).
+      - --gpu-memory-utilization=${QFN_AA_GPU_UTIL:-0.97}
+      - --max-num-seqs=${QFN_AA_MAX_NUM_SEQS:-16}
+      - --max-num-batched-tokens=${QFN_AA_MAX_NUM_BATCHED_TOKENS:-8192}
+      - --enable-chunked-prefill
+      # His MTP config: 4 speculative tokens, probabilistic draft sampling.
+      - '--speculative-config={"method":"mtp","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
+      # His cudagraph config: a single capture size of 5 (not the concurrency
+      # ladder vllm-gptq uses). Kept verbatim for the reproduction.
+      - '--compilation-config={"cudagraph_capture_sizes":[5],"max_cudagraph_capture_size":5}'
+      # His hf-overrides: YaRN factor 2.0 over a 262144 window AND the raised
+      # max_position_embeddings (the latter is what makes max-model-len 524288
+      # legal). Matches his recipe exactly.
+      - '--hf-overrides={"text_config":{"max_position_embeddings":524288,"rope_parameters":{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":262144,"mrope_section":[11,11,10],"mrope_interleaved":true,"partial_rotary_factor":0.25,"rope_theta":10000000}}}'
+      - --tool-call-parser=qwen3_coder
+      - --enable-auto-tool-choice
+      - --reasoning-parser=qwen3
+      # Deviation (deliberate, for fidelity): his recipe sets NO --chat-template,
+      # so the checkpoint's own template is used. vllm-gptq overrides with the
+      # froggeric template to dodge a reasoning_effort bug; if this service
+      # misbehaves in the reasoning phase, that bug is the first suspect and
+      # adding `--chat-template=/app/chat-templates/qwen.jinja` is the fix.
+      # His sampling defaults (temperature 0.6, top_k 20, NO presence_penalty --
+      # both differ from vllm-gptq's 0.8 / 40 / presence 1).
+      - '--override-generation-config={"max_tokens":65536,"temperature":0.6,"top_p":0.95,"top_k":20}'
+      - --host=0.0.0.0
+      - --port=8080
+    environment:
+      - HOME=${HOME}
+      - HIP_VISIBLE_DEVICES=${QFN_AA_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - ROCR_VISIBLE_DEVICES=${QFN_AA_HIP_VISIBLE_DEVICES:-0,1,2,3}
+      - VLLM_ROCM_USE_AITER=0
+      - OMP_NUM_THREADS=${QFN_AA_OMP_NUM_THREADS:-8}
+      # NOT set here, on purpose -- this is the whole point. VLLM_PLE_CPU_OFFLOAD
+      # triggers the cudaHostRegister path that fails on this host with the new
+      # image. His recipe omits it; so does this. See the service comment.
+      # Own cache suffix -- NOT shared with vllm-gptq/mxfp4 (caches key on the
+      # checkpoint + build; root-owned since this image runs as root).
+      - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_gptqaa
+      - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_gptqaa
+      - TRITON_CACHE_DIR=${HOME}/.cache/triton_gptqaa
+      - AITER_ROOT_DIR=${HOME}/.cache/aiter_gptqaa
+      # Driver env from his recipe, commented for the MES-hang caveat above.
+      # Uncomment ALL THREE together for the exact reproduction.
+      # - GPU_MAX_HW_QUEUES=1
+      # - HSA_ENABLE_INTERRUPT=1
+      # - HSA_ENABLE_MWAITX=1
+    volumes:
+      - ./chat-templates/:/app/chat-templates
+      - ${HOME}:${HOME}
+      - ${HOME}/.vllm-workspace:/workspace
+      - /srv/llm:/srv/llm
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 60
+      start_period: 1800s
+
   # Standalone image-generation service (the ONLY non-LLM service here): the
   # Qwen/Qwen-Image-2.1 text-to-image / image-editing diffusion model, served
   # through the diffusers QwenImage21Pipeline behind tools/image_gen_server.py.

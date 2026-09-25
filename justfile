@@ -124,6 +124,11 @@ clear-vllm-caches:
         "$HOME/.cache/triton_gptq"
         "$HOME/.cache/torchinductor_gptq"
         "$HOME/.cache/aiter_gptq"
+        # vllm-gptq-aa service's per-container compile caches
+        "$HOME/.cache/vllm_gptqaa"
+        "$HOME/.cache/triton_gptqaa"
+        "$HOME/.cache/torchinductor_gptqaa"
+        "$HOME/.cache/aiter_gptqaa"
         # image-gen service's compile caches (NOT its HF_HOME — the checkpoint
         # is a local /srv/llm dir, so HF_HOME holds little and wiping it only
         # forces re-fetches of tokenizer/processor assets).
@@ -412,6 +417,39 @@ up-gptq: check
 # Stop just the vllm-gptq service (leaves the other services running).
 down-gptq:
     @{{compose}} down vllm-gptq
+
+# Start the vllm-gptq-aa service — tcclaviger's own TP4 recipe for the "AA"
+# GPTQ build, reproduced as faithfully as possible on his current image, so any
+# issue can be quoted back to him verbatim. It resolves the QFN_AA_VLLM_TAG
+# image by tag with pull_policy: always, so every start re-pulls that tag. Unlike
+# vllm-gptq it does NOT set VLLM_PLE_CPU_OFFLOAD (the new image's cudaHostRegister
+# pinning fails on this host; PLE stays in VRAM at TP4), so it does not pin ~116
+# GiB of host RAM — but it still wants all four GPUs, so one service at a time.
+up-gptq-aa: check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    aa_model="$(grep -m1 '^QFN_AA_MODEL_DIR=' .env 2>/dev/null | cut -d= -f2- || true)"
+    aa_model="${aa_model:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}"
+    if [ ! -f "$aa_model/model.safetensors.index.json" ]; then
+      printf 'error: model not found at %s\n' "$aa_model" >&2
+      printf 'Download it first (~115 GB, resumable):\n' >&2
+      printf '  hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \\\n' >&2
+      printf '    --local-dir %s\n' "$aa_model" >&2
+      exit 1
+    fi
+    aa_port="$(grep -m1 '^QFN_AA_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    aa_port="${aa_port:-8006}"
+    aa_tag="$(grep -m1 '^QFN_AA_VLLM_TAG=' .env 2>/dev/null | cut -d= -f2- || true)"
+    aa_tag="${aa_tag:-29.04.15}"
+    {{compose}} up -d vllm-gptq-aa
+    printf 'vllm-gptq-aa starting at http://localhost:%s/v1 (re-pulled %s first).\n' "$aa_port" "$aa_tag"
+    printf 'First boot loads the ~115 GB checkpoint from /srv/llm and compiles\n'
+    printf 'Triton/inductor kernels into a cold cache — can take 20+ min;\n'
+    printf 'check readiness with `just logs vllm-gptq-aa`.\n'
+
+# Stop just the vllm-gptq-aa service (leaves the other services running).
+down-gptq-aa:
+    @{{compose}} down vllm-gptq-aa
 
 # Build the image-generation image (Dockerfile.imagegen). Thin: it reuses the
 # ROCm/torch base from Dockerfile.fullbuild's framework-base stage but installs
