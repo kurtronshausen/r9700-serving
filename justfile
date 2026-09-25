@@ -422,10 +422,11 @@ down-gptq:
 # GPTQ build, reproduced as faithfully as possible on his current image, so any
 # issue can be quoted back to him verbatim. It resolves the QFN_AA_VLLM_TAG
 # image by tag with pull_policy: always, so every start re-pulls that tag.
-# VLLM_PLE_CPU_OFFLOAD is gone from this image; PLE placement is now the
-# --engram-config default (cpu_offload=true), so the PLE table is still pinned
-# in host RAM (~116 GiB) as with vllm-gptq, and it wants all four GPUs — one
-# service at a time.
+# VLLM_PLE_CPU_OFFLOAD is gone from this image; its --engram-config host-RAM
+# default pins via cudaHostRegister, which registers 0 bytes on this box and
+# crashes. So this service runs --ple-nvme-offload: the PLE table comes from
+# NVMe with a small RAM row cache instead of ~116 GiB of pinned host RAM. It
+# still wants all four GPUs — one service at a time.
 up-gptq-aa: check
     #!/usr/bin/env bash
     set -euo pipefail

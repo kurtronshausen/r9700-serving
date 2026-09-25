@@ -474,9 +474,9 @@ services:
   # bytes on this RDNA4/ROCm box even with memlock unlimited (crash line:
   # "vmlck=0kB ... registered=0MiB"), so every worker dies at init. 29.02.1
   # (also vllm 0.29.0.dev0, different build) uses the ROCr VMM / ipc_export path
-  # that works here. 29.04.15 dropped the cudaHostRegister path for a UVA pin
-  # (see vllm-gptq-aa), so it may boot -- but that is untested, and this service
-  # stays on the known-good 29.02.1. Before bumping this tag, verify a PLE boot
+  # that works here. 29.04.15's host-RAM default STILL pins via cudaHostRegister
+  # and fails the same way; it only boots here with --ple-nvme-offload (see
+  # vllm-gptq-aa). Before bumping this tag, verify a PLE boot
   # succeeds; do NOT assume newer = working.
   #
   # The serve config below comes from the GPTQ model card's TP4 example, not
@@ -618,20 +618,21 @@ services:
   # so a mismatch is never silent. It is a SEPARATE service from `vllm-gptq`
   # (which stays pinned to 29.02.1 + CPU-offload as the known-good fallback).
   #
-  # PLE PLACEMENT: VLLM_PLE_CPU_OFFLOAD does not exist in this image; placement
-  # is config-driven via --engram-config, whose cpu_offload defaults to true --
-  # pinned host RAM + UVA gather. Neither his recipe nor this service sets it,
-  # so the int6 PLE table stays in host RAM, exactly as with vllm-gptq.
+  # PLE PLACEMENT -- NVMe IS REQUIRED ON THIS HOST. VLLM_PLE_CPU_OFFLOAD is gone
+  # from this image; placement is config-driven via --engram-config, whose
+  # cpu_offload DEFAULTS to true (pinned host RAM). But that default path pins
+  # via cudaHostRegister -- the SAME call that registers 0 bytes on this
+  # RDNA4/ROCm box ("vmlck=0kB registered=0MiB", ple_layer.py
+  # _register_sharded_host_table) and killed 29.04.9. So the plain default does
+  # NOT boot here either. --ple-nvme-offload (+ --ple-cache-reuse) routes the
+  # table to NVMe with a small RAM row cache (--ple-cache-gb), bypassing
+  # cudaHostRegister -- this is what actually makes it boot on this box. His
+  # recipe runs the default (works on his host); the NVMe flags are our
+  # host-specific deviation.
   #
-  # WHY THIS MAY BOOT WHERE THE 29.04.9 EXPERIMENT DID NOT: 29.04.9 pinned that
-  # host RAM with cudaHostRegister, which registers 0 bytes on this RDNA4/ROCm
-  # box ("vmlck=0kB registered=0MiB") and kills every worker. This build's
-  # default path is the UVA/ROCr-VMM one that works here (same mechanism as
-  # 29.02.1). UNTESTED on this host -- 29.04.15 has not been brought up yet.
-  #
-  # RAM: the PLE table is still pinned in host RAM, so the ~110 GiB memlock
-  # footprint of vllm-gptq applies here too. One-at-a-time still applies (TP4,
-  # all four cards).
+  # RAM: with NVMe offload the full int6 table is NOT pinned in host RAM (only a
+  # row cache), so this drops vllm-gptq's ~110 GiB memlock footprint. One-at-a-
+  # time still applies (TP4, all four cards).
   #
   # DRIVER ENV: his recipe sets GPU_MAX_HW_QUEUES=1 / HSA_ENABLE_INTERRUPT=1 /
   # HSA_ENABLE_MWAITX=1, and they are ENABLED below so this runs his exact config.
@@ -653,8 +654,8 @@ services:
         aliases:
           - llm-gptq-aa-backend
     ulimits:
-      # His recipe raises memlock; needed here regardless, since the PLE table
-      # is pinned host RAM, and it matches his `ulimits memlock -1` exactly.
+      # His recipe raises memlock; kept for parity with his launch even though
+      # the NVMe PLE path does not need it (nothing gets cudaHostRegister'd).
       memlock:
         soft: -1
         hard: -1
@@ -676,11 +677,12 @@ services:
       # does NOT need VLLM_ALLOW_LONG_MAX_MODEL_LEN. Doubles worst-case KV per
       # request vs the 262144 native window.
       - --max-model-len=${QFN_AA_MAX_MODEL_LEN:-524288}
-      # 0.97 per his recipe. NOTE: this is the value that over-committed
-      # vllm-gptq's KV at 262144; at 524288 + no CPU-offload the accounting
-      # differs, so it is left at his number for fidelity. If it OOMs under
-      # long-context load, this is the first knob to drop (toward 0.92).
-      - --gpu-memory-utilization=${QFN_AA_GPU_UTIL:-0.97}
+      # 0.92, NOT his 0.97 -- deliberate deviation. vLLM sizes the KV pool as
+      # util*VRAM minus WEIGHTS ONLY, ignoring the activation + cudagraph
+      # footprint. At 0.97 the first large prefill OOM'd ("0 bytes free", 432 MiB
+      # alloc, 29.27 GiB allocated of 31.86). 0.92 leaves room for act+graphs.
+      # Same fix as vllm-gptq. Raise back toward 0.97 only if KV thrash appears.
+      - --gpu-memory-utilization=${QFN_AA_GPU_UTIL:-0.92}
       - --max-num-seqs=${QFN_AA_MAX_NUM_SEQS:-16}
       - --max-num-batched-tokens=${QFN_AA_MAX_NUM_BATCHED_TOKENS:-8192}
       - --enable-chunked-prefill
@@ -696,16 +698,21 @@ services:
       - --tool-call-parser=qwen3_coder
       - --enable-auto-tool-choice
       - --reasoning-parser=qwen3
-      # Deviation (deliberate, for fidelity): his recipe sets NO --chat-template,
-      # so the checkpoint's own template is used. vllm-gptq overrides with the
-      # froggeric template to dodge a reasoning_effort bug; if this service
-      # misbehaves in the reasoning phase, that bug is the first suspect and
-      # adding `--chat-template=/app/chat-templates/qwen.jinja` is the fix.
+      # Deviation (deliberate): his recipe sets NO --chat-template, so the
+      # checkpoint's own template is used -- but that template explodes on high
+      # reasoning_effort (the same bug vllm-gptq dodges with the froggeric
+      # template). We override with the pinned qwen.jinja for that reason; see
+      # the --chat-template line at the end of this command list.
       # His sampling defaults (temperature 0.6, top_k 20, NO presence_penalty --
       # both differ from vllm-gptq's 0.8 / 40 / presence 1).
       - '--override-generation-config={"max_tokens":65536,"temperature":0.6,"top_p":0.95,"top_k":20}'
       - --host=0.0.0.0
       - --port=8080
+      # Host-specific deviations from his recipe (which runs the host-RAM
+      # default and boots on his box). See the PLE PLACEMENT note above.
+      - --ple-nvme-offload    # table on NVMe, not cudaHostRegister (fails here)
+      - --ple-cache-reuse     # reuse NVMe-backed PLE rows across requests
+      - --chat-template=/app/chat-templates/qwen.jinja  # dodge high-reasoning bug
     environment:
       - HOME=${HOME}
       - HIP_VISIBLE_DEVICES=${QFN_AA_HIP_VISIBLE_DEVICES:-0,1,2,3}
@@ -713,8 +720,9 @@ services:
       - VLLM_ROCM_USE_AITER=0
       - OMP_NUM_THREADS=${QFN_AA_OMP_NUM_THREADS:-8}
       # VLLM_PLE_CPU_OFFLOAD is gone from this image; PLE placement is the
-      # --engram-config default (cpu_offload=true, host RAM + UVA gather). His
-      # recipe sets neither, so this service sets neither. See the service comment.
+      # --engram-config default (cpu_offload=true = host RAM), but that default
+      # pins via cudaHostRegister which fails here, so the command list uses
+      # --ple-nvme-offload instead. See the service comment.
       # Own cache suffix -- NOT shared with vllm-gptq/mxfp4 (caches key on the
       # checkpoint + build; root-owned since this image runs as root).
       - VLLM_CACHE_ROOT=${HOME}/.cache/vllm_gptqaa
@@ -798,6 +806,7 @@ services:
       - HF_HOME=${HOME}/.cache/huggingface_imagegen
       - TRITON_CACHE_DIR=${HOME}/.cache/triton_imagegen
       - TORCHINDUCTOR_CACHE_DIR=${HOME}/.cache/torchinductor_imagegen
+      - VLLM_CHAT_TEMPLATE=/app/chat-templates/qwen.jinja
     volumes:
       - ./tools:/app/tools:ro
       - ${HOME}:${HOME}
