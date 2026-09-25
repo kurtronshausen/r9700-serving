@@ -429,7 +429,7 @@ up-gptq-aa: check
     #!/usr/bin/env bash
     set -euo pipefail
     aa_model="$(grep -m1 '^QFN_AA_MODEL_DIR=' .env 2>/dev/null | cut -d= -f2- || true)"
-    aa_model="${aa_model:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}"
+    aa_model="${aa_model:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ-AA2}"
     if [ ! -f "$aa_model/model.safetensors.index.json" ]; then
       printf 'error: model not found at %s\n' "$aa_model" >&2
       printf 'Download it first (~115 GB, resumable):\n' >&2

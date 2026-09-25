@@ -654,11 +654,13 @@ services:
     command:
       # Deviation (plumbing): his recipe uses a generic `/app/models` path; here
       # the checkpoint lives under /srv/llm (repo convention: big models never
-      # in ~/.cache). This dir currently holds the AA1 download; the hub repo
-      # was updated in place to AA2 (better PPL/top-1) -- re-download for AA2:
+      # in ~/.cache). The hub repo was updated in place to the AA2 re-quantize
+      # (better PPL/top-1 than AA1) and "no other image reads this checkpoint",
+      # so it is downloaded to its own -AA2 dir (leaves vllm-gptq's AA1 dir
+      # untouched for rollback). Download once (~115 GB):
       #   hf download tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ \
-      #     --local-dir /srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ
-      - ${QFN_AA_MODEL_DIR:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ}
+      #     --local-dir /srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ-AA2
+      - ${QFN_AA_MODEL_DIR:-/srv/llm/tcclaviger/Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ-AA2}
       - --tensor-parallel-size=${QFN_AA_TP:-4}
       - --served-model-name=${QFN_AA_SERVED_NAME:-Qwen3.8-Flash-Next-AA}
       - --kv-cache-dtype=fp8
