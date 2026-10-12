@@ -453,6 +453,66 @@ up-gptq-aa: check
 down-gptq-aa:
     @{{compose}} down vllm-gptq-aa
 
+# Download the radiance .rad container for the vllm-radiance-engine service
+# (113.6 GiB). Resumable, so re-run after an interrupted transfer. Written to
+# /srv/llm (the 1.3T volume), never ~/.cache -- see the disk-layout note in
+# AGENTS.md. Takes ~35 min at ~57 MB/s.
+get-radiance-rad:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest_dir="/srv/llm/StillDeadcode"
+    dest="$dest_dir/qwen3.8-next-flash-fp8-iq4r-moe.rad"
+    mkdir -p "$dest_dir"
+    printf 'Downloading 113.6 GiB to %s (resumes if interrupted)...\n' "$dest"
+    curl -L -C - --retry 10 --retry-delay 5 -o "$dest" \
+      'https://huggingface.co/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe/resolve/main/qwen3.8-next-flash-fp8-iq4r-moe.rad'
+    printf 'Verifying it is a readable .rad container...\n'
+    {{compose}} run --rm --no-deps --entrypoint rad-info vllm-radiance-engine "$dest"
+
+# The prefix cache's disk tier lives under ${RADIANCE_ENGINE_STATE}:/data and
+# the container runs as the host user, so the dir must be user-owned or the
+# engine cannot write it. Mirrors ensure-cache-dirs, for the one service whose
+# state is NOT under ~/.cache.
+ensure-radiance-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state="$(grep -m1 '^RADIANCE_ENGINE_STATE=' .env 2>/dev/null | cut -d= -f2- || true)"
+    state="${state:-/srv/llm/radiance}"
+    mkdir -p "$state/radiance/prefix-cache"
+    if [ "$(stat -c '%u' "$state")" != "$(id -u)" ]; then
+      printf '%s is not owned by %s; fixing ownership (one-time sudo).\n' "$state" "$(id -un)" >&2
+      sudo chown -R "$(id -u):$(id -g)" "$state"
+    fi
+    printf 'radiance state dir ready: %s (owner: %s)\n' "$state" "$(id -un)"
+
+# Start the radiance ENGINE service (stilldeadcode/radiance -- NOT the
+# vllm-radiance vLLM service on 8002). Pulls the pinned tag, checks the .rad is
+# in place, then starts. Not concurrent with anything else: TP=4 wants all four
+# cards and the host pool pins 4 x 12 GiB of RAM.
+up-radiance-engine: check ensure-radiance-state
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rad="/srv/llm/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe.rad"
+    if [ ! -f "$rad" ]; then
+      printf 'error: %s not found.\n' "$rad" >&2
+      printf 'Download it first (113.6 GiB, resumable): `just get-radiance-rad`\n' >&2
+      exit 1
+    fi
+    printf 'Free host RAM: %s GiB (the host pool pins 48 GiB at the defaults)\n' \
+      "$(awk '/MemAvailable/{printf "%d", $2/1048576}' /proc/meminfo)"
+    {{compose}} pull vllm-radiance-engine
+    {{compose}} up -d vllm-radiance-engine
+    port="$(grep -m1 '^RADIANCE_ENGINE_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
+    printf 'vllm-radiance-engine starting at http://localhost:%s/v1\n' "${port:-8007}"
+    printf 'First boot loads 113.6 GiB across four cards; watch the log for the\n'
+    printf '`rope:` line (should say YaRN factor 2 -- the rotary reaches 524288)\n'
+    printf 'and the `elastic` line (re-derive RADIANCE_ENGINE_HOST_POOL_MIB from it).\n'
+    printf 'Readiness: `just logs vllm-radiance-engine` or `just compose ps`.\n'
+
+# Stop just the vllm-radiance-engine service (leaves the others running).
+down-radiance-engine:
+    @{{compose}} down vllm-radiance-engine
+
 # Build the image-generation image (Dockerfile.imagegen). Thin: it reuses the
 # ROCm/torch base from Dockerfile.fullbuild's framework-base stage but installs
 # diffusers (from git at DIFFUSERS_REF) + transformers instead of vLLM. Separate

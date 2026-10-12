@@ -1,7 +1,7 @@
 # vLLM on Radeon AI PRO R9700
 
 Build and run vLLM from source for AMD Radeon AI PRO R9700 GPUs. The default
-configuration targets four R9700s (`gfx1201`). `compose.yaml` defines seven
+configuration targets four R9700s (`gfx1201`). `compose.yaml` defines eight
 independent services — six vLLM OpenAI-compatible servers: `vllm` (dense
 Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 (Qwen3.8-Flash-Next, a GDN-hybrid/MoE model built from a separate vLLM tree),
@@ -9,8 +9,11 @@ Qwen3.6/3.8-27B or the 35B-A3B MoE), `vllm-qwen-flashnext`
 community image), and `vllm-mxfp4` / `vllm-gptq` / `vllm-gptq-aa` (quantizations
 of Qwen3.8-Flash-Next served by the prebuilt `tcclaviger/vllm` community image;
 `vllm-gptq-aa` is a faithful reproduction of tcclaviger's own TP4 recipe) —
-plus one non-LLM service, `image-gen` (Qwen-Image-2.1, a text-to-image
-diffusion model served via diffusers, not vLLM). Each
+plus two that are **not vLLM at all**: `vllm-radiance-engine` (the radiance
+inference engine — a C++/HIP server, not vLLM with radiance kernels — serving
+Qwen3.8-Flash-Next from a single `.rad` container; despite the name it shares
+nothing with `vllm-radiance`), and `image-gen` (Qwen-Image-2.1, a text-to-image
+diffusion model served via diffusers). Each
 has its own port, model
 profile, and compile-cache dirs (see [Choosing a service/profile](#choosing-a-serviceprofile) for how to pick one and why they aren't meant to run together).
 
@@ -83,7 +86,11 @@ and `vllm-mxfp4` at `http://localhost:8003/v1` (`MXFP4_PORT`) /
 (`GPTQ_PORT`) / `llm-gptq-backend` alias, and `vllm-gptq-aa` at
 `http://localhost:8006/v1` (`QFN_AA_PORT`) / `llm-gptq-aa-backend` alias (the
 same checkpoint, but a faithful reproduction of tcclaviger's own TP4 recipe on
-his current image — see the service comment in `compose.yaml`). The non-LLM `image-gen` service
+his current image — see the service comment in `compose.yaml`), and
+`vllm-radiance-engine` at `http://localhost:8007/v1` (`RADIANCE_ENGINE_PORT`) /
+`llm-radiance-engine-backend` alias (the radiance **engine**, not vLLM — same
+OpenAI `/v1/chat/completions` surface, plus Anthropic Messages and llama-server
+native; `http://localhost:8007/` is its dashboard). The non-LLM `image-gen` service
 (diffusers, not vLLM) listens at `http://localhost:8005` (`IMAGEGEN_PORT`) /
 `llm-imagegen-backend` alias, exposing `POST /generate` (returns a PNG) and an
 OpenAI-shaped `POST /v1/images/generations` (returns base64) for litellm.
@@ -138,13 +145,21 @@ Runtime environment is split across files:
   path, quantization, and every `vllm serve` flag are hardcoded in
   `compose.yaml`'s `command:` list, tunable only via the `RADIANCE_*`
   variables in `.env` (see the comment block above the service definition).
+- `vllm-radiance-engine` likewise uses no profile file, but for a stronger
+  reason: it is not vLLM, so there is no `vllm serve` command line to assemble.
+  Its `command:` list is radiance's own flag vocabulary (`--model=<file>.rad`,
+  `--rope-scaling`, `--placement`, `--host-pool-mib`, …), tunable via
+  `RADIANCE_ENGINE_*`. It takes no `env/2xr9700.vllm.common` /
+  `aiter-unified-attention.env` either — the engine drives the driver directly
+  and needs no ROCm on the host, only an `amdgpu` kernel driver new enough for
+  ROCm 10.1.
 
 ### Choosing a service/profile
 
 This host has four GPUs, and every profile here defaults to
 `--tensor-parallel-size 4` (all of them) because that's what benchmarks best
 for each model — there's no small/large split of GPUs to hand out per
-service. That's the practical reason the seven services are meant to be run
+service. That's the practical reason the eight services are meant to be run
 **one at a time, never concurrently**: two services both wanting all 4 GPUs
 would either fail to allocate VRAM or silently corrupt each other's KV cache
 if forced onto overlapping devices. (The non-LLM `image-gen` service is the
@@ -154,7 +169,8 @@ additionally pin ~110 GiB of the *host's* RAM for their n-gram PLE tables via
 `VLLM_PLE_CPU_OFFLOAD` — another reason not to double up. `vllm-gptq-aa` serves
 the same table from **NVMe** (`--ple-nvme-offload`) instead of pinning it,
 because that image's host-RAM path uses `cudaHostRegister`, which this box can't
-do.) Pick one:
+do. `vllm-radiance-engine` pins 4 × `--host-pool-mib` = 48 GiB by default —
+less than the vLLM PLE services, but the same one-at-a-time arithmetic.) Pick one:
 
 | service               | model                       | port (default) | when to use |
 |:----------------------|:-----------------------------|:---------------:|:------------|
@@ -164,7 +180,8 @@ do.) Pick one:
 | `vllm-mxfp4`          | Qwen3.8-Flash-Next-MXFP4-FP8 (GDN-hybrid/MoE, `qwen4_exp` — same model family as `vllm-qwen-flashnext`) | 8003 | Trying tcclaviger's MXFP4/FP8 quant + GDN/PLE kernels for Flash-Next. Prebuilt community image (`tcclaviger/vllm`, **pinned by digest** via `MXFP4_VLLM_REF` — the `dev` tag it used to follow is mutable and has been rebuilt under us); no build required (`docker pull` only), but not built/patched by this repo. Runs its own kernel paths (`CLAV_GDN`, AITER off), so it can't share the aiter JIT prewarm; the 125.8 GB checkpoint lives at `/srv/llm/tcclaviger/…` (download once with `hf download` — `just up-mxfp4` refuses to start until it's there). |
 | `vllm-gptq`           | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ ("AA2": activation-aware MXFP4 experts + int6 n-gram PLE table — better PPL/top-1 than `vllm-mxfp4`'s checkpoint) | 8004 | The same model at better quality, needs a **newer image** than `vllm-mxfp4` (the int6 PLE table won't load on the pinned build), which is why it is its own service: switching quantization is `just down-mxfp4 && just up-gptq`, with no compose edit and no cache clear (each service has its own cache suffix). Pulls the newest `29.02.1` build on every start (`pull_policy: always`). Config comes from the model card's TP4 example — the image ships no confirmed TP4 or GPTQ recipe, so treat it as experimental; see the driver-env note in `.env.example` before enabling `GPU_MAX_HW_QUEUES`/`HSA_ENABLE_*`. |
 | `vllm-gptq-aa`        | Qwen3.8-Flash-Next-MXFP4-FP8-GPTQ, "AA2" checkpoint (same model repo as `vllm-gptq`) | 8006 | tcclaviger's **own TP4 recipe**, reproduced on his current image (`29.04.15` == `dev`), with the deviations this host needs so a problem can still be quoted back to him. `VLLM_PLE_CPU_OFFLOAD` is gone — placement is now the `--engram-config` default (`cpu_offload=true`), but that default pins host RAM via `cudaHostRegister`, which registers 0 bytes here (same failure as `29.04.9`). So it runs **`--ple-nvme-offload` + `--ple-cache-reuse`**: the PLE table serves from NVMe with a small RAM row cache, bypassing `cudaHostRegister` — this is what makes it boot. Other deviations from his config: `--gpu-memory-utilization 0.92` (0.97 OOMs the first large prefill — same KV over-commit as `vllm-gptq`), a `--chat-template` override (`qwen.jinja`) to dodge the high-reasoning-effort bug, and the driver trio (`GPU_MAX_HW_QUEUES`/`HSA_ENABLE_*`) ENABLED to match him exactly (see the hang caveat). Faithful to him otherwise: `--max-model-len 524288` via a raised `max_position_embeddings`, cudagraph size `[5]`, MTP 4 tokens, temp 0.6/top_k 20. Each deviation is annotated in the `compose.yaml` service comment. |
-| `image-gen`           | Qwen-Image-2.1 (text-to-image / image-editing diffusion — Qwen3-VL-8B encoder + 7B DiT + VAE, **not** an LLM) | 8005 | The one non-vLLM service: served by the diffusers `QwenImage21Pipeline` behind a thin FastAPI wrapper (`tools/image_gen_server.py`), built by its own `Dockerfile.imagegen` (shares only the ROCm/torch base with the LLM images; `diffusers` is pinned to a git commit — see `.env.example`). The ~32 GB of weights fill a whole card and default to spreading over all four, so it runs one-at-a-time like the rest. **Experimental on gfx1201**: no verified ROCm/RDNA4 report; if a boot faults or emits NaN, try `IMAGEGEN_DTYPE=float32` or `IMAGEGEN_OFFLOAD=sequential`. |
+| `vllm-radiance-engine` | Qwen3.8-Flash-Next, `StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe` — a 113.6 GiB `.rad` container (4-bit codebook experts via GPTQ + Walsh-Hadamard rotation, int8 W8A8 trunk, 10 protected bf16 experts, MTP depth 3, bf16 vision tower) | 8007 | The Flash-Next quant **outside** vLLM: the radiance engine (`stilldeadcode/radiance`, C++/HIP, its own `libr4d` gfx1201 kernels) rather than any vLLM build. Upstream's own KL measurement against bf16 puts it at mean 0.0789 / 92.85% top-1 all-tokens and 0.0239 / 94.57% on text turns — the reference point for the other Flash-Next services. Serves **524288** context via `--rope-scaling yarn:2` applied at load (no reconversion; upstream lists both Flash-Next variants as validated at factor 2 with retrieval at ~500K). Because it is not vLLM: no `entrypoint.sh`, no `--quantization`, no AITER env, no Triton/inductor caches, and no ROCm needed on the host. Name warning: unrelated to `vllm-radiance` (8002), which *is* vLLM. Bring-up caveats in the `compose.yaml` service comment — read the boot log's `rope:` and `elastic` lines on first boot. |
+| `image-gen`           | Qwen-Image-2.1 (text-to-image / image-editing diffusion — Qwen3-VL-8B encoder + 7B DiT + VAE, **not** an LLM) | 8005 | A second non-vLLM service (alongside `vllm-radiance-engine`): served by the diffusers `QwenImage21Pipeline` behind a thin FastAPI wrapper (`tools/image_gen_server.py`), built by its own `Dockerfile.imagegen` (shares only the ROCm/torch base with the LLM images; `diffusers` is pinned to a git commit — see `.env.example`). The ~32 GB of weights fill a whole card and default to spreading over all four, so it runs one-at-a-time like the rest. **Experimental on gfx1201**: no verified ROCm/RDNA4 report; if a boot faults or emits NaN, try `IMAGEGEN_DTYPE=float32` or `IMAGEGEN_OFFLOAD=sequential`. |
 
 Starting/stopping each:
 
@@ -186,6 +203,10 @@ just down-gptq         # stop it
 
 just up-gptq-aa        # start `vllm-gptq-aa` (tcclaviger's TP4 recipe, re-pulls QFN_AA_VLLM_TAG)
 just down-gptq-aa      # stop it
+
+just get-radiance-rad  # one-time: download the 113.6 GiB .rad to /srv/llm (resumable)
+just up-radiance-engine   # start `vllm-radiance-engine` (radiance engine; pulls RADIANCE_ENGINE_TAG)
+just down-radiance-engine # stop it
 
 just build-imagegen && just up-imagegen     # start `image-gen` (diffusion; build once)
 just down-imagegen     # stop it
@@ -212,7 +233,11 @@ All profiles mount [froggeric's Qwen-Fixed-Chat-Templates]
 fetched from the repo's `main`). The `vllm` service sets
 `VLLM_CHAT_TEMPLATE` to that file, so `entrypoint.sh` applies it to the
 qwen3.x models, overriding each model's bundled template. `vllm-radiance`
-passes the same file directly via `--chat-template` in its `command:` list.
+passes the same file directly via `--chat-template` in its `command:` list, and
+`vllm-radiance-engine` passes it via radiance's own `--override-chat-template`
+(the `.rad` carries a template internally, which this replaces). Note the
+template already maps OpenAI's `high` to `low` rather than raising, so the
+engine needs no `--reasoning-effort-map`.
 `vllm-qwen-flashnext` currently leaves the template unset and falls back to
 the tokenizer's built-in one (no `VLLM_CHAT_TEMPLATE` in its profile
 env files) — revisit if flashnext's agentic behavior needs the same fixes.

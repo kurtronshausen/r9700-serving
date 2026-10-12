@@ -14,7 +14,9 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just check` | validate the compose config for both model profiles (main + flash-next) |
 | `just build` | build the main Docker image (`vllm` service only) |
 | `just build-flashnext` | build the Qwen3.8-Flash-Next image (Dockerfile.flashnext, `vllm-qwen-flashnext` service) |
-| `just build-imagegen` / `just up-imagegen` | build / start the `image-gen` service — Qwen-Image-2.1 text-to-image via diffusers (Dockerfile.imagegen), the only non-vLLM service; runs one-at-a-time like the rest (its ~32 GB of weights want all four GPUs) |
+| `just build-imagegen` / `just up-imagegen` | build / start the `image-gen` service — Qwen-Image-2.1 text-to-image via diffusers (Dockerfile.imagegen), a non-vLLM service; runs one-at-a-time like the rest (its ~32 GB of weights want all four GPUs) |
+| `just get-radiance-rad` | one-time download of the 113.6 GiB `.rad` container for `vllm-radiance-engine` to `/srv/llm` (resumable; verifies it with the image's own `rad-info`) |
+| `just up-radiance-engine` / `just down-radiance-engine` | start / stop the `vllm-radiance-engine` service — Qwen3.8-Flash-Next on the **radiance engine** (`stilldeadcode/radiance`), NOT vLLM and unrelated to `vllm-radiance`; pulls `RADIANCE_ENGINE_TAG`, no build step. Takes 524288 context via `--rope-scaling yarn:2`. First boot loads 113.6 GiB across four cards |
 | `just rebuild` / `just rebuild-flashnext` | force-rebuild (no cache), main / flashnext image |
 | `just up` | start the main `vllm` service (runs `check`, `ensure-cache-dirs`, `prewarm`, waits for readiness, runs warmup) |
 | `just up-flashnext` | start the `vllm-qwen-flashnext` service (needs `build-flashnext` first) |
@@ -138,6 +140,36 @@ there. Prefer these over ad-hoc ssh one-liners when waiting on builds/logs.
 - If `just rebuild` terminates (signal 15 / timeout), check the image with
   `docker inspect localhost/vllm-fullbuild:latest` to verify completion before
   attempting `just up`.
+
+### Radiance engine (`vllm-radiance-engine`) — not vLLM
+- The one LLM service that is **not** vLLM: `stilldeadcode/radiance` is a C++/HIP
+  engine with its own `libr4d` kernels, its own flag vocabulary, and a single
+  `.rad` container as its model file. Do not carry vLLM habits into it — no
+  `--quantization` (the quant is in the `.rad`), no `entrypoint.sh` arg assembly,
+  no AITER/`HIP_VISIBLE_DEVICES` env, no `env/<profile>.env`, no Triton/inductor
+  caches (so nothing to clear in `just clear-vllm-caches`).
+- Two names, two projects: `vllm-radiance` (8002) = `stilldeadcode/vllm-radiance`
+  = vLLM + R4D kernels on the 27B. `vllm-radiance-engine` (8007) =
+  `stilldeadcode/radiance` = the engine, on Flash-Next. `RADIANCE_*` knobs belong
+  to the first; `RADIANCE_ENGINE_*` to the second.
+- The image is `FROM scratch`: no distro, no `curl`, busybox only. Its healthcheck
+  must use `busybox wget`, and `group_add` must be **numeric** gids (no
+  `/etc/group` to resolve `video`/`render`). `docker exec … sh` works (busybox)
+  but nothing else is in there.
+- 524288 context is `--rope-scaling yarn:2:262144`, applied at **load** time —
+  no reconversion, no model edit. Changing the factor invalidates the on-disk
+  prefix cache (fingerprinted with the resolved rotary): clear
+  `${RADIANCE_ENGINE_STATE}/radiance/prefix-cache` when you do.
+- `--host-pool-mib` is pinned per card, so 4 ranks × 12288 = 48 GiB of host RAM;
+  `ulimits: memlock: -1` is required (the host's docker default is 8 MiB and
+  would cap it silently). Upstream says the elastic expert window is a different
+  shape above 2 ranks — re-derive it from the boot log's `elastic` line.
+- `--tp-wire wht6` is LOSSY at 3-4 ranks (tiered int8). Upstream's own 4-rank row
+  omits it; that is why `RADIANCE_ENGINE_TP_WIRE` defaults to `exact`.
+- Unverified at first write-up: whether radiance's Jinja subset fully renders
+  `chat-templates/qwen.jinja` (434 lines). If chat returns 501 or renders
+  wrong, test by dropping `--override-chat-template` and letting the `.rad`'s
+  built-in template serve.
 
 ### GEMM Kernel Config Tuning
 - vLLM keys its Triton GEMM kernel configs on the **per-GPU shape** (dense W8A8

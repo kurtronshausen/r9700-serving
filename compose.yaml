@@ -708,6 +708,194 @@ services:
       retries: 60
       start_period: 1800s
 
+  # Seventh service, and the ONLY one that is not vLLM: the radiance engine
+  # (`stilldeadcode/radiance`, codeberg.org/StillDeadcode/radiance) serving
+  # StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe -- the same Qwen3.8-Flash-Next
+  # architecture as `vllm-qwen-flashnext`/`vllm-mxfp4`/`vllm-gptq-aa`, but a
+  # from-scratch C++/HIP engine with its own `libr4d` gfx1201 kernels, loading a
+  # single 113.6 GiB `.rad` container (weights + tokenizer + chat template +
+  # MTP drafter + vision tower in one file).
+  #
+  # DO NOT CONFUSE WITH `vllm-radiance` (8002), which is the *other* StillDeadcode
+  # image -- `stilldeadcode/vllm-radiance`, stock vLLM with R4D kernels plugged
+  # in, serving the 27B. Different project, different image, different engine.
+  # This one is `stilldeadcode/radiance`.
+  #
+  # Because it is not vLLM, none of this repo's vLLM conventions apply here: no
+  # `entrypoint.sh` arg assembly (the image's ENTRYPOINT *is* `radiance`, so args
+  # come from `command:` like the other prebuilt services), no `env/<profile>.env`,
+  # no `--quantization` (the quant is baked into the .rad), no AITER/HIP env (the
+  # engine talks to the driver directly), and no Triton/inductor caches to clear.
+  # It also does not need ROCm on the host -- only an `amdgpu` driver new enough
+  # for ROCm 10.1.
+  #
+  # QUANT: 4-bit codes into a 16-level non-uniform codebook after a 128-point
+  # Walsh-Hadamard rotation on the routed experts (GPTQ-chosen, 3 coordinate-
+  # descent sweeps), one E4M3 scale per 64 weights; int8 W8A8 trunk (attention,
+  # delta-net, shared expert, lm_head); ten high-energy experts per layer kept
+  # bf16; MTP depth 3; vision tower bf16. Upstream's own KL measurement vs bf16:
+  # mean 0.0789 / top-1 agreement 92.85% all-tokens, 0.0239 / 94.57% on text
+  # and assistant turns.
+  #
+  # 524288 CONTEXT: the container is trained at 262144 and upstream serves it at
+  # 200000. YaRN factor 2 over the trained 262144 reaches exactly 524288, and
+  # radiance applies it at LOAD time via `--rope-scaling` -- no reconversion, no
+  # model-file edit (docs/YARN.md). Upstream lists both Flash-Next variants as
+  # validated at factor 2 with retrieval at ~500K tokens, and TP3 perplexity
+  # within ~+-1% of stock. Same target as `vllm-gptq-aa`'s YaRN `--hf-overrides`,
+  # which is what makes the two directly comparable at 512K. Two caveats from
+  # docs/YARN.md: (a) the MTP drafter gets the same factor over its OWN trained
+  # length, not the target's; (b) the on-disk prefix cache is fingerprinted with
+  # the resolved rotary, so changing the factor invalidates the whole cache dir.
+  #
+  # TP=4, all four cards (repo rule: one service at a time). Upstream's published
+  # row for 4 ranks runs the EXACT all-reduce -- it omits `--tp-wire wht6`, which
+  # at 3-4 ranks selects a *lossy* tiered-int8 wire -- so that is the default
+  # here; `RADIANCE_ENGINE_TP_WIRE=wht6` A/Bs it. Upstream also warns that
+  # per-step rate at 4 ranks vs its 2-card recipe is unmeasured, and that the
+  # elastic expert window is a different shape above 2 ranks: read the boot log's
+  # `elastic` line and re-derive RADIANCE_ENGINE_HOST_POOL_MIB before trusting it.
+  #
+  # MEMORY: `--host-pool-mib` is pinned on EVERY card, so the default 12288 pins
+  # 4 x 12 GiB = 48 GiB of host RAM (the engine streams experts that miss VRAM
+  # from there; the model card says ~32 GB free is needed). The 47.7 GiB n-gram
+  # PLE table defaults to `auto` placement (vram -> ram -> disk), which is why
+  # upstream's own compose sets no `--ngram-placement`. `ulimits: memlock: -1` is
+  # required for the pinning -- the host's docker default is 8 MiB, which would
+  # cap it silently.
+  #
+  # The image is `FROM scratch`: no distro, no curl, busybox only. Hence the
+  # `busybox wget` healthcheck below (a `curl` probe would fail outright) and the
+  # NUMERIC group_add (there is no /etc/group in the image to resolve "video").
+  vllm-radiance-engine:
+    <<: *amd_devices
+    image: docker.io/stilldeadcode/radiance:${RADIANCE_ENGINE_TAG:-1.4.0}
+    container_name: vllm-radiance-engine
+    restart: unless-stopped
+    init: true
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    ports:
+      - "${RADIANCE_ENGINE_PORT:-8007}:8000"
+    networks:
+      default:
+        aliases:
+          - llm-radiance-engine-backend
+    # The engine finishes the step in flight and releases the cards on SIGTERM.
+    stop_grace_period: 60s
+    # io_uring (n-gram table reads from the container) and the mbind/
+    # set_mempolicy NUMA calls the ROCm runtime make for host memory are both
+    # refused by Docker's default seccomp profile. `label=disable` is carried
+    # over from *amd_devices, which this key replaces rather than extends.
+    security_opt:
+      - seccomp=unconfined
+      - label=disable
+    group_add:
+      - "${VIDEO_GID:-983}"
+      - "${RENDER_GID:-987}"
+    ulimits:
+      # --host-pool-mib pins 4 x 12 GiB; the host's docker default memlock is
+      # 8 MiB, which would cap the pool silently.
+      memlock:
+        soft: -1
+        hard: -1
+    command:
+      # radiance's parser takes SPACE-separated values only -- `--flag=value`
+      # is rejected outright with "unknown option" (verified against 1.4.0), so
+      # every flag below is a pair of list entries. It also has no
+      # `--tensor-parallel-size`; the only spelling is `--tp`.
+      # The .rad container, downloaded once (resumable) to the 1.3T /srv/llm
+      # volume, NOT ~/.cache (98G /home) -- see AGENTS.md / disk-layout notes:
+      #   curl -L -C - -o /srv/llm/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe.rad \
+      #     https://huggingface.co/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe/resolve/main/qwen3.8-next-flash-fp8-iq4r-moe.rad
+      # Do NOT pass the bare HF repo id here: the image has no curl/jq, so the
+      # engine's own hub-fetch path cannot run inside the container.
+      - --model
+      - /srv/llm/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe.rad
+      - --served-model-name
+      - ${RADIANCE_ENGINE_SERVED_NAME:-qwen3.8-flash-next-rad}
+      - --tp
+      - "${RADIANCE_ENGINE_TP:-4}"
+      # `exact` = upstream's 4-rank row. `wht6` at 4 ranks is a lossy tiered-int8
+      # all-reduce wire (at 2 ranks it is rotated 6-bit); A/B it deliberately.
+      - --tp-wire
+      - ${RADIANCE_ENGINE_TP_WIRE:-exact}
+      - --p2p
+      - ${RADIANCE_ENGINE_P2P:-auto}
+      # 524288 = YaRN factor 2 over the container's trained 262144 (see the
+      # service header). ORIG is passed explicitly rather than defaulted so the
+      # arithmetic is visible here; if the container is ever reconverted at a
+      # different trained length, this is the number to change.
+      - --rope-scaling
+      - yarn:${RADIANCE_ENGINE_YARN_FACTOR:-2}:${RADIANCE_ENGINE_ROPE_ORIG:-262144}
+      - --max-model-len
+      - "${RADIANCE_ENGINE_MAX_MODEL_LEN:-524288}"
+      # 8, not upstream's 32: Flash-Next is hybrid, so every sequence carries its
+      # own recurrent state, and upstream keeps Flash-Next at 8 for exactly that
+      # reason -- 32 of them take the memory back from the attention cache and
+      # from the expert slab.
+      - --max-num-seqs
+      - "${RADIANCE_ENGINE_MAX_NUM_SEQS:-8}"
+      - --max-num-batched-tokens
+      - "${RADIANCE_ENGINE_MAX_NUM_BATCHED_TOKENS:-2048}"
+      # fp8 KV: halves what a token of context costs, which matters most at a
+      # 524288 window. Upstream's Flash-Next row uses fp8.
+      - --kv-cache-dtype
+      - ${RADIANCE_ENGINE_KV_DTYPE:-fp8}
+      - --placement
+      - ${RADIANCE_ENGINE_PLACEMENT:-expert_tiered}
+      - --host-pool-mib
+      - "${RADIANCE_ENGINE_HOST_POOL_MIB:-12288}"
+      - --gpu-headroom-mib
+      - "${RADIANCE_ENGINE_GPU_HEADROOM_MIB:-96}"
+      # 47.7 GiB n-gram PLE table; auto tries vram, then ram, then disk.
+      - --ngram-placement
+      - ${RADIANCE_ENGINE_NGRAM_PLACEMENT:-auto}
+      - --num-speculative-tokens
+      - "${RADIANCE_ENGINE_NUM_SPEC_TOKENS:-3}"
+      # Three-tier prefix cache (upstream's flashnext.yaml): VRAM -> host ->
+      # disk under /data, so an idle session's KV leaves VRAM for the experts
+      # and comes back without a re-prefill. NOTE from the engine's own docs:
+      # the disk tier holds conversation content UNENCRYPTED.
+      - --prefix-cache-host-mib
+      - "${RADIANCE_ENGINE_PREFIX_CACHE_HOST_MIB:-4096}"
+      - --prefix-cache-dir
+      - /data/radiance/prefix-cache
+      - --prefix-cache-disk-mib
+      - "${RADIANCE_ENGINE_PREFIX_CACHE_DISK_MIB:-65536}"
+      # Same vetted froggeric template as every other service here, in place of
+      # the one baked into the .rad. qwen.jinja already maps OpenAI's `high`
+      # (which this template family does not have) to `low` rather than raising,
+      # so no --reasoning-effort-map is needed; set RADIANCE_ENGINE_* effort
+      # flags only to change the server-side default.
+      - --override-chat-template
+      - /app/chat-templates/qwen.jinja
+      # The loop symptom from CLAUDE.md's open issue: this repo's other Flash-Next
+      # services carry presence_penalty=1.0 as a mitigation, so mirror it here to
+      # keep the comparison honest. Delete both lines to use the engine's default.
+      - --presence-penalty
+      - "${RADIANCE_ENGINE_PRESENCE_PENALTY:-1.0}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    volumes:
+      - ./chat-templates/:/app/chat-templates:ro
+      # The .rad is read-only by design (the engine never writes to /models).
+      - /srv/llm:/srv/llm:ro
+      # Writable state root for the prefix cache's disk tier. Must be owned by
+      # ${USER_UID} on the host or the engine cannot write it -- the image runs
+      # as the host user, not root. Created by `just ensure-radiance-state`.
+      - ${RADIANCE_ENGINE_STATE:-/srv/llm/radiance}:/data
+    healthcheck:
+      # busybox, not curl: the image is FROM scratch and ships no curl.
+      test: ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Loading 113.6 GiB across four cards, plus the first-boot expert-tiering
+      # plan. Raise if a cold boot is still short.
+      start_period: 15m
+
   # Standalone image-generation service (the ONLY non-LLM service here): the
   # Qwen/Qwen-Image-2.1 text-to-image / image-editing diffusion model, served
   # through the diffusers QwenImage21Pipeline behind tools/image_gen_server.py.
