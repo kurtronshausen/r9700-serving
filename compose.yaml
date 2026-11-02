@@ -769,7 +769,7 @@ services:
   # NUMERIC group_add (there is no /etc/group in the image to resolve "video").
   vllm-radiance-engine:
     <<: *amd_devices
-    image: docker.io/stilldeadcode/radiance:${RADIANCE_ENGINE_TAG:-1.4.0}
+    image: docker.io/stilldeadcode/radiance:${RADIANCE_ENGINE_TAG:-1.16.0}
     container_name: vllm-radiance-engine
     restart: unless-stopped
     init: true
@@ -852,16 +852,17 @@ services:
       - ${RADIANCE_ENGINE_NGRAM_PLACEMENT:-auto}
       - --num-speculative-tokens
       - "${RADIANCE_ENGINE_NUM_SPEC_TOKENS:-3}"
-      # Three-tier prefix cache (upstream's flashnext.yaml): VRAM -> host ->
-      # disk under /data, so an idle session's KV leaves VRAM for the experts
-      # and comes back without a re-prefill. NOTE from the engine's own docs:
-      # the disk tier holds conversation content UNENCRYPTED.
-      - --prefix-cache-host-mib
-      - "${RADIANCE_ENGINE_PREFIX_CACHE_HOST_MIB:-4096}"
-      - --prefix-cache-dir
-      - /data/radiance/prefix-cache
-      - --prefix-cache-disk-mib
-      - "${RADIANCE_ENGINE_PREFIX_CACHE_DISK_MIB:-65536}"
+      # Two-tier prefix cache since upstream v1.5.0 (VRAM -> host only): the
+      # disk tier wrote every block and snapshot per prompt and its copies
+      # never outlived the process, so --prefix-cache-dir/-disk-mib are gone;
+      # any old /data/radiance/prefix-cache blobs are dead weight to delete.
+      - --prefix-cache-mib
+      - "${RADIANCE_ENGINE_PREFIX_CACHE_MIB:-4096}"
+      # exact = resume only where a cold prefill would start a chunk (bit-
+      # identical to cold); nearest = resume at the deepest snapshot, re-
+      # prefills up to a chunk less, not bit-identical. A/B before trusting it.
+      - --prefix-resume
+      - "${RADIANCE_ENGINE_PREFIX_RESUME:-exact}"
       # Same vetted froggeric template as every other service here, in place of
       # the one baked into the .rad. qwen.jinja already maps OpenAI's `high`
       # (which this template family does not have) to `low` rather than raising,
@@ -869,6 +870,8 @@ services:
       # flags only to change the server-side default.
       - --override-chat-template
       - /app/chat-templates/qwen.jinja
+      - --reasoning-effort-map
+      - high=xhigh
       # The loop symptom from CLAUDE.md's open issue: this repo's other Flash-Next
       # services carry presence_penalty=1.0 as a mitigation, so mirror it here to
       # keep the comparison honest. Delete both lines to use the engine's default.
