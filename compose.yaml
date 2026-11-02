@@ -837,6 +837,18 @@ services:
       - "${RADIANCE_ENGINE_MAX_NUM_SEQS:-8}"
       - --max-num-batched-tokens
       - "${RADIANCE_ENGINE_MAX_NUM_BATCHED_TOKENS:-2048}"
+      # PREFILL PACING (flags new since 1.7.0). Default behavior: every step carries
+      # a prefill chunk while one is queued, so decode is paced at batch/step-latency
+      # (~2048-token chunk ~= 230 ms -> ~10-35 t/s aggregate during prefill storms).
+      # interleave=N runs up to N decode-only steps after each chunk (max 64; 0 = the
+      # old every-step-carries-a-chunk behavior). busy-prefill-chunk caps a chunk's
+      # share of a step that has other work: auto leaves decode rows room, off lets
+      # the chunk take the whole step, N holds it to N tokens. Trial defaults below;
+      # revert either via .env without touching this file.
+      - --prefill-interleave
+      - "${RADIANCE_ENGINE_PREFILL_INTERLEAVE:-8}"
+      - --busy-prefill-chunk
+      - "${RADIANCE_ENGINE_BUSY_PREFILL_CHUNK:-1024}"
       # fp8 KV: halves what a token of context costs, which matters most at a
       # 524288 window. Upstream's Flash-Next row uses fp8.
       - --kv-cache-dtype
