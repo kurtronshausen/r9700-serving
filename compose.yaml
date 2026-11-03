@@ -845,10 +845,17 @@ services:
       # share of a step that has other work: auto leaves decode rows room, off lets
       # the chunk take the whole step, N holds it to N tokens. Trial defaults below;
       # revert either via .env without touching this file.
+      #
+      # A prefill step streams every routed layer's non-resident experts onto
+      # the card, and the stager hides that PCIe transfer behind the step's
+      # compute only at steps of >= 1025 tokens: below it, a held-back chunk
+      # reads those experts synchronously, which costs more than the smaller
+      # step saves. So N must be >= 1025 (and <= MAX_NUM_BATCHED_TOKENS);
+      # decode still gets what is left of the step budget.
       - --prefill-interleave
       - "${RADIANCE_ENGINE_PREFILL_INTERLEAVE:-8}"
       - --busy-prefill-chunk
-      - "${RADIANCE_ENGINE_BUSY_PREFILL_CHUNK:-1024}"
+      - "${RADIANCE_ENGINE_BUSY_PREFILL_CHUNK:-1536}"
       # fp8 KV: halves what a token of context costs, which matters most at a
       # 524288 window. Upstream's Flash-Next row uses fp8.
       - --kv-cache-dtype
@@ -857,8 +864,14 @@ services:
       - ${RADIANCE_ENGINE_PLACEMENT:-expert_tiered}
       - --host-pool-mib
       - "${RADIANCE_ENGINE_HOST_POOL_MIB:-12288}"
+      # VRAM held back at boot for what the budget cannot count: a kernel's code
+      # object and scratch, sized on first launch, plugin hipMalloc, and however
+      # much another process takes between the card read and the allocations
+      # landing. Shortfall shows up as an OOM mid-request, on whichever request
+      # triggers an unseen code path. The engine prints what it needs on the
+      # `settled at ... against ...` line and raises the margin one for one.
       - --gpu-headroom-mib
-      - "${RADIANCE_ENGINE_GPU_HEADROOM_MIB:-96}"
+      - "${RADIANCE_ENGINE_GPU_HEADROOM_MIB:-112}"
       # 47.7 GiB n-gram PLE table; auto tries vram, then ram, then disk.
       - --ngram-placement
       - ${RADIANCE_ENGINE_NGRAM_PLACEMENT:-auto}
