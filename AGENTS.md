@@ -15,8 +15,10 @@ Use `just` for all build/run workflows. Commands are defined in `justfile`.
 | `just build` | build the main Docker image (`vllm` service only) |
 | `just build-flashnext` | build the Qwen3.8-Flash-Next image (Dockerfile.flashnext, `vllm-qwen-flashnext` service) |
 | `just build-imagegen` / `just up-imagegen` | build / start the `image-gen` service — Qwen-Image-2.1 text-to-image via diffusers (Dockerfile.imagegen), a non-vLLM service; runs one-at-a-time like the rest (its ~32 GB of weights want all four GPUs) |
-| `just get-radiance-rad` | one-time download of the 113.6 GiB `.rad` container for `vllm-radiance-engine` to `/srv/llm` (resumable; verifies it with the image's own `rad-info`) |
-| `just up-radiance-engine` / `just down-radiance-engine` | start / stop the `vllm-radiance-engine` service — Qwen3.8-Flash-Next on the **radiance engine** (`stilldeadcode/radiance`), NOT vLLM and unrelated to `vllm-radiance`; pulls `RADIANCE_ENGINE_TAG`, no build step. Takes 524288 context via `--rope-scaling yarn:2`. First boot loads 113.6 GiB across four cards |
+| `just get-radiance-rad [served\|iqr-v4]` | one-time download of a 113.6 GiB `.rad` container for `vllm-radiance-engine` to `/srv/llm` (resumable; verifies it with the image's own `rad-info`, and checks the published sha256 for `iqr-v4`) |
+| `just radiance-config` | render `${RADIANCE_ENGINE_STATE}/radiance.yaml` from the `RADIANCE_ENGINE_*` vars in `.env` — radiance 2.x takes one YAML config and **no flags**; `up-radiance-engine` runs this for you. Refuses a 1.x tag |
+| `just radiance-check` | validate that file with `radiance --check`: reads and validates it, loads nothing, opens no card — safe while the service is live |
+| `just up-radiance-engine` / `just down-radiance-engine` | start / stop the `vllm-radiance-engine` service — Qwen3.8-Flash-Next on the **radiance engine** (`stilldeadcode/radiance`), NOT vLLM and unrelated to `vllm-radiance`; pulls `RADIANCE_ENGINE_TAG`, no build step, renders its config first. Takes 524288 context via `rope-scaling: yarn:2`. First boot loads 113.6 GiB across four cards |
 | `just rebuild` / `just rebuild-flashnext` | force-rebuild (no cache), main / flashnext image |
 | `just up` | start the main `vllm` service (runs `check`, `ensure-cache-dirs`, `prewarm`, waits for readiness, runs warmup) |
 | `just up-flashnext` | start the `vllm-qwen-flashnext` service (needs `build-flashnext` first) |
@@ -143,11 +145,36 @@ there. Prefer these over ad-hoc ssh one-liners when waiting on builds/logs.
 
 ### Radiance engine (`vllm-radiance-engine`) — not vLLM
 - The one LLM service that is **not** vLLM: `stilldeadcode/radiance` is a C++/HIP
-  engine with its own `libr4d` kernels, its own flag vocabulary, and a single
+  engine with its own `libr4d` kernels, its own config vocabulary, and a single
   `.rad` container as its model file. Do not carry vLLM habits into it — no
-  `--quantization` (the quant is in the `.rad`), no `entrypoint.sh` arg assembly,
+  quantization flag (the quant is in the `.rad`), no `entrypoint.sh` arg assembly,
   no AITER/`HIP_VISIBLE_DEVICES` env, no `env/<profile>.env`, no Triton/inductor
   caches (so nothing to clear in `just clear-vllm-caches`).
+- **radiance 2.x has NO server flags.** 2.0.0 replaced the whole command line
+  with one YAML file (`radiance --config FILE [--check]`), so this service's
+  `command:` is two entries and every tuned value lives in
+  `${RADIANCE_ENGINE_STATE}/radiance.yaml`, which `just radiance-config`
+  **generates** from the `RADIANCE_ENGINE_*` vars in `.env`. `.env` stays the
+  tuning surface; never hand-edit the generated file or add flags back to
+  compose. `just radiance-check` validates it with the engine and opens no card,
+  so it is safe while a live engine holds all the VRAM. Hot reload exists
+  (SIGHUP) but a restart is still how this repo applies config.
+- Two keys changed **meaning** at 2.0 and both are silently wrong if carried
+  over: `host-pool-mib` became a total across ranks (the renderer multiplies the
+  per-rank `.env` number by TP), and `kv-cache-dtype: fp8` is *refused at boot*
+  for Flash-Next — only GLM's plugin declares an E4M3 cache — so we serve `i8`,
+  which costs **more** per token than 1.x's packed caches did. Read the `kv:`
+  line of the boot log after any context/sequence change.
+- The `.rad` gate is a *format* gate, not a version gate: 2.x refuses
+  block-FP8/MXFP4/M2XFP4/ParoQuant containers, but ours
+  (`qwen3.8-next-flash-fp8-iq4r-moe.rad`) **loads** — verified 2026-11-19 with
+  2.2.0's `rad-info` and a GPU-less load that opened it as
+  `arch=qwen4exp quant=bf16` with no refusal, because its recipe (int8 trunk +
+  `w4nl64a8h` experts) is still the one 2.2 ships as served. Upstream's migration
+  prose names that *filename* as refused; trust the load test, not the name.
+  The newer `qwen3.8-next-flash-iqr-v4.rad` is a different weight file and does
+  need > 1.17 (`just get-radiance-rad iqr-v4`, then point
+  `RADIANCE_ENGINE_MODEL` at it).
 - Two names, two projects: `vllm-radiance` (8002) = `stilldeadcode/vllm-radiance`
   = vLLM + R4D kernels on the 27B. `vllm-radiance-engine` (8007) =
   `stilldeadcode/radiance` = the engine, on Flash-Next. `RADIANCE_*` knobs belong
@@ -156,19 +183,33 @@ there. Prefer these over ad-hoc ssh one-liners when waiting on builds/logs.
   must use `busybox wget`, and `group_add` must be **numeric** gids (no
   `/etc/group` to resolve `video`/`render`). `docker exec … sh` works (busybox)
   but nothing else is in there.
-- 524288 context is `--rope-scaling yarn:2:262144`, applied at **load** time —
+- 524288 context is `rope-scaling: yarn:2:262144`, applied at **load** time —
   no reconversion, no model edit. Changing the factor invalidates the on-disk
   prefix cache (fingerprinted with the resolved rotary): clear
   `${RADIANCE_ENGINE_STATE}/radiance/prefix-cache` when you do.
-- `--host-pool-mib` is pinned per card, so 4 ranks × 12288 = 48 GiB of host RAM;
-  `ulimits: memlock: -1` is required (the host's docker default is 8 MiB and
-  would cap it silently). Upstream says the elastic expert window is a different
-  shape above 2 ranks — re-derive it from the boot log's `elastic` line.
-- `--tp-wire wht6` is LOSSY at 3-4 ranks (tiered int8). Upstream's own 4-rank row
+- The host pool is pinned on **every rank**, so `.env`'s 6144 × 4 ranks = 24 GiB
+  of host RAM (the file gets the 24576 total — see above). It is allocated in full
+  at boot but only the plan's off-card experts use it (~2.4 GiB/rank at TP=4,
+  8 × 262144; `mover: ... N pinned pool slots`), and above ~3 GiB/rank it does not
+  move the VRAM split — so the RAM 1.16's 12288 left idle goes to
+  `prefix-cache-mib: 24576` instead. `ulimits: memlock: -1`
+  is required (the host's docker default is 8 MiB and would cap it silently).
+  Upstream says the elastic expert window is a different shape above 2 ranks —
+  re-derive it from the boot log's `elastic` line.
+- `tp-wire: wht6` is LOSSY at 3-4 ranks (tiered int8). Upstream's own 4-rank row
   omits it; that is why `RADIANCE_ENGINE_TP_WIRE` defaults to `exact`.
+- `prefix-resume: exact` is only bit-identical to a cold run on an **idle**
+  server, which a shared box is not — that is why `.env` runs `nearest` (the
+  2026-11-03 boot logged ~1.46M tokens of re-prefill from exact-mode truncation).
+- `prefill-span-pass: step` (and the rest of the span family) is served on
+  Flash-Next only at **1-2 ranks** — upstream snippets that set it are 2-card
+  rows, so do not copy them into this TP=4 config. The pacing knobs that *do*
+  apply here are `prefill-interleave` and `busy-prefill-chunk`, the latter with
+  a floor of 1025 tokens (below it a held-back chunk reads streamed experts
+  synchronously instead of hiding them behind the step).
 - Unverified at first write-up: whether radiance's Jinja subset fully renders
   `chat-templates/qwen.jinja` (434 lines). If chat returns 501 or renders
-  wrong, test by dropping `--override-chat-template` and letting the `.rad`'s
+  wrong, test by dropping `override-chat-template` and letting the `.rad`'s
   built-in template serve.
 
 ### GEMM Kernel Config Tuning

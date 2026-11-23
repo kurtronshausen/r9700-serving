@@ -756,20 +756,36 @@ services:
   # elastic expert window is a different shape above 2 ranks: read the boot log's
   # `elastic` line and re-derive RADIANCE_ENGINE_HOST_POOL_MIB before trusting it.
   #
-  # MEMORY: `--host-pool-mib` is pinned on EVERY card, so the default 12288 pins
-  # 4 x 12 GiB = 48 GiB of host RAM (the engine streams experts that miss VRAM
-  # from there; the model card says ~32 GB free is needed). The 47.7 GiB n-gram
-  # PLE table defaults to `auto` placement (vram -> ram -> disk), which is why
-  # upstream's own compose sets no `--ngram-placement`. `ulimits: memlock: -1` is
-  # required for the pinning -- the host's docker default is 8 MiB, which would
-  # cap it silently.
+  # MEMORY: the host pool is pinned on EVERY rank, so the 6144 that
+  # .env carries pins 4 x 6 GiB = 24 GiB of host RAM (the engine streams experts
+  # that miss VRAM from there). NOTE the unit change at radiance 2.0: its
+  # `host-pool-mib` is a TOTAL across the ranks, so `just radiance-config` writes
+  # `6144 * tp` into the generated file and .env keeps the per-rank number. Only
+  # the experts the plan leaves off the card use it (~2.4 GiB a rank at TP=4); too
+  # small raises the VRAM expert floor and shrinks the cache, which the boot
+  # log's `kv: the pool backs N%` line shows. The 47.7 GiB n-gram PLE table
+  # defaults to `auto` placement (vram -> ram -> disk), which is why upstream's
+  # own compose sets no ngram placement. `ulimits: memlock: -1` is required for
+  # the pinning -- the host's docker default is 8 MiB, which would cap it
+  # silently.
+  #
+  # CONFIG (radiance >= 2.0): there are no server flags any more -- 2.0.0 removed
+  # them all, and the binary takes only `--config FILE` plus `--check`. The file
+  # is GENERATED from .env by `just radiance-config` into
+  # ${RADIANCE_ENGINE_STATE}/radiance.yaml, mounted read-only below; every tuned
+  # value and its rationale lives there, not in this file. `just radiance-check`
+  # validates it with the engine itself and opens no card, so it is safe to run
+  # while a live engine holds all the VRAM. A 1.x tag will NOT boot this service
+  # (`--config` is an unknown option there), and `radiance-config` says so rather
+  # than letting compose fail cryptically; reverting the pinned tag means
+  # restoring the old flag list from git.
   #
   # The image is `FROM scratch`: no distro, no curl, busybox only. Hence the
   # `busybox wget` healthcheck below (a `curl` probe would fail outright) and the
   # NUMERIC group_add (there is no /etc/group in the image to resolve "video").
   vllm-radiance-engine:
     <<: *amd_devices
-    image: docker.io/stilldeadcode/radiance:${RADIANCE_ENGINE_TAG:-1.16.0}
+    image: docker.io/stilldeadcode/radiance:${RADIANCE_ENGINE_TAG:-2.2.0}
     container_name: vllm-radiance-engine
     restart: unless-stopped
     init: true
@@ -793,127 +809,37 @@ services:
       - "${VIDEO_GID:-983}"
       - "${RENDER_GID:-987}"
     ulimits:
-      # --host-pool-mib pins 4 x 12 GiB; the host's docker default memlock is
+      # host-pool-mib pins 4 x 6 GiB; the host's docker default memlock is
       # 8 MiB, which would cap the pool silently.
       memlock:
         soft: -1
         hard: -1
     command:
-      # radiance's parser takes SPACE-separated values only -- `--flag=value`
-      # is rejected outright with "unknown option" (verified against 1.4.0), so
-      # every flag below is a pair of list entries. It also has no
-      # `--tensor-parallel-size`; the only spelling is `--tp`.
-      # The .rad container, downloaded once (resumable) to the 1.3T /srv/llm
-      # volume, NOT ~/.cache (98G /home) -- see AGENTS.md / disk-layout notes:
-      #   curl -L -C - -o /srv/llm/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe.rad \
-      #     https://huggingface.co/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe/resolve/main/qwen3.8-next-flash-fp8-iq4r-moe.rad
-      # Do NOT pass the bare HF repo id here: the image has no curl/jq, so the
-      # engine's own hub-fetch path cannot run inside the container.
-      - --model
-      - /srv/llm/StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe.rad
-      - --served-model-name
-      - ${RADIANCE_ENGINE_SERVED_NAME:-qwen3.8-flash-next-rad}
-      - --tp
-      - "${RADIANCE_ENGINE_TP:-4}"
-      # `exact` = upstream's 4-rank row. `wht6` at 4 ranks is a lossy tiered-int8
-      # all-reduce wire (at 2 ranks it is rotated 6-bit); A/B it deliberately.
-      - --tp-wire
-      - ${RADIANCE_ENGINE_TP_WIRE:-exact}
-      - --p2p
-      - ${RADIANCE_ENGINE_P2P:-auto}
-      # 524288 = YaRN factor 2 over the container's trained 262144 (see the
-      # service header). ORIG is passed explicitly rather than defaulted so the
-      # arithmetic is visible here; if the container is ever reconverted at a
-      # different trained length, this is the number to change.
-      - --rope-scaling
-      - yarn:${RADIANCE_ENGINE_YARN_FACTOR:-2}:${RADIANCE_ENGINE_ROPE_ORIG:-262144}
-      - --max-model-len
-      - "${RADIANCE_ENGINE_MAX_MODEL_LEN:-524288}"
-      # 8, not upstream's 32: Flash-Next is hybrid, so every sequence carries its
-      # own recurrent state, and upstream keeps Flash-Next at 8 for exactly that
-      # reason -- 32 of them take the memory back from the attention cache and
-      # from the expert slab.
-      - --max-num-seqs
-      - "${RADIANCE_ENGINE_MAX_NUM_SEQS:-8}"
-      - --max-num-batched-tokens
-      - "${RADIANCE_ENGINE_MAX_NUM_BATCHED_TOKENS:-2048}"
-      # PREFILL PACING (flags new since 1.7.0). Default behavior: every step carries
-      # a prefill chunk while one is queued, so decode is paced at batch/step-latency
-      # (~2048-token chunk ~= 230 ms -> ~10-35 t/s aggregate during prefill storms).
-      # interleave=N runs up to N decode-only steps after each chunk (max 64; 0 = the
-      # old every-step-carries-a-chunk behavior). busy-prefill-chunk caps a chunk's
-      # share of a step that has other work: auto leaves decode rows room, off lets
-      # the chunk take the whole step, N holds it to N tokens. Trial defaults below;
-      # revert either via .env without touching this file.
-      #
-      # A prefill step streams every routed layer's non-resident experts onto
-      # the card, and the stager hides that PCIe transfer behind the step's
-      # compute only at steps of >= 1025 tokens: below it, a held-back chunk
-      # reads those experts synchronously, which costs more than the smaller
-      # step saves. So N must be >= 1025 (and <= MAX_NUM_BATCHED_TOKENS);
-      # decode still gets what is left of the step budget.
-      - --prefill-interleave
-      - "${RADIANCE_ENGINE_PREFILL_INTERLEAVE:-8}"
-      - --busy-prefill-chunk
-      - "${RADIANCE_ENGINE_BUSY_PREFILL_CHUNK:-1536}"
-      # fp8 KV: halves what a token of context costs, which matters most at a
-      # 524288 window. Upstream's Flash-Next row uses fp8.
-      - --kv-cache-dtype
-      - ${RADIANCE_ENGINE_KV_DTYPE:-fp8}
-      - --placement
-      - ${RADIANCE_ENGINE_PLACEMENT:-expert_tiered}
-      - --host-pool-mib
-      - "${RADIANCE_ENGINE_HOST_POOL_MIB:-12288}"
-      # VRAM held back at boot for what the budget cannot count: a kernel's code
-      # object and scratch, sized on first launch, plugin hipMalloc, and however
-      # much another process takes between the card read and the allocations
-      # landing. Shortfall shows up as an OOM mid-request, on whichever request
-      # triggers an unseen code path. The engine prints what it needs on the
-      # `settled at ... against ...` line and raises the margin one for one.
-      - --gpu-headroom-mib
-      - "${RADIANCE_ENGINE_GPU_HEADROOM_MIB:-112}"
-      # 47.7 GiB n-gram PLE table; auto tries vram, then ram, then disk.
-      - --ngram-placement
-      - ${RADIANCE_ENGINE_NGRAM_PLACEMENT:-auto}
-      - --num-speculative-tokens
-      - "${RADIANCE_ENGINE_NUM_SPEC_TOKENS:-3}"
-      # Two-tier prefix cache since upstream v1.5.0 (VRAM -> host only): the
-      # disk tier wrote every block and snapshot per prompt and its copies
-      # never outlived the process, so --prefix-cache-dir/-disk-mib are gone;
-      # any old /data/radiance/prefix-cache blobs are dead weight to delete.
-      - --prefix-cache-mib
-      - "${RADIANCE_ENGINE_PREFIX_CACHE_MIB:-4096}"
-      # exact = resume only where a cold prefill would start a chunk (bit-
-      # identical to cold); nearest = resume at the deepest snapshot, re-
-      # prefills up to a chunk less, not bit-identical. A/B before trusting it.
-      - --prefix-resume
-      - "${RADIANCE_ENGINE_PREFIX_RESUME:-exact}"
-      # Same vetted froggeric template as every other service here, in place of
-      # the one baked into the .rad. qwen.jinja already maps OpenAI's `high`
-      # (which this template family does not have) to `low` rather than raising,
-      # so no --reasoning-effort-map is needed; set RADIANCE_ENGINE_* effort
-      # flags only to change the server-side default.
-      - --override-chat-template
-      - /app/chat-templates/qwen.jinja
-      - --reasoning-effort-map
-      - high=xhigh
-      # The loop symptom from CLAUDE.md's open issue: this repo's other Flash-Next
-      # services carry presence_penalty=1.0 as a mitigation, so mirror it here to
-      # keep the comparison honest. Delete both lines to use the engine's default.
-      - --presence-penalty
-      - "${RADIANCE_ENGINE_PRESENCE_PENALTY:-1.0}"
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
+      # radiance >= 2.0 takes NO flags -- 2.0.0 removed the whole surface and the
+      # binary reads one YAML file. That file is GENERATED from .env by
+      # `just radiance-config` (which up-radiance-engine runs for you); every
+      # tuned value and its rationale lives there, so do not hand-edit it or add
+      # flags back here. Check it without loading anything: `just radiance-check`.
+      # Do NOT pass a bare HF repo id as the model: the image has no curl/jq, so
+      # the engine's own hub-fetch path cannot run inside the container -- the
+      # .rad is downloaded to the 1.3T /srv/llm volume by `just get-radiance-rad`.
+      - --config
+      - /etc/radiance/radiance.yaml
     volumes:
       - ./chat-templates/:/app/chat-templates:ro
       # The .rad is read-only by design (the engine never writes to /models).
       - /srv/llm:/srv/llm:ro
-      # Writable state root for the prefix cache's disk tier. Must be owned by
-      # ${USER_UID} on the host or the engine cannot write it -- the image runs
-      # as the host user, not root. Created by `just ensure-radiance-state`.
+      # Writable state root: the prefix cache's host/scratch tier lives here.
+      # Must be owned by ${USER_UID} on the host or the engine cannot write it --
+      # the image runs as the host user, not root. Created by
+      # `just ensure-radiance-state`; it also holds the generated config mounted
+      # below (written by `just radiance-config`).
       - ${RADIANCE_ENGINE_STATE:-/srv/llm/radiance}:/data
+      # The generated serve config, single-file mount so a stray render cannot
+      # write back. It MUST exist before the service starts (compose would
+      # otherwise create a directory here and the engine would fail on it);
+      # `just up-radiance-engine` renders first, or run `just radiance-config`.
+      - ${RADIANCE_ENGINE_STATE:-/srv/llm/radiance}/radiance.yaml:/etc/radiance/radiance.yaml:ro
     healthcheck:
       # busybox, not curl: the image is FROM scratch and ships no curl.
       test: ["CMD", "busybox", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/health"]
