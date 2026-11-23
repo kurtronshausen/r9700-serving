@@ -715,14 +715,15 @@ up-radiance-engine: check ensure-radiance-state radiance-config
     printf 'Free host RAM: %s GiB (the host pool pins 24 GiB at the defaults)\n' \
       "$(awk '/MemAvailable/{printf "%d", $2/1048576}' /proc/meminfo)"
     {{compose}} pull vllm-radiance-engine
-    {{compose}} up -d vllm-radiance-engine
+    # The config is a bind-mounted file compose can't see change, so recreate.
+    {{compose}} up -d --force-recreate vllm-radiance-engine
     port="$(grep -m1 '^RADIANCE_ENGINE_PORT=' .env 2>/dev/null | cut -d= -f2- || true)"
     printf 'vllm-radiance-engine starting at http://localhost:%s/v1\n' "${port:-8007}"
     printf 'First boot loads 113.6 GiB across four cards; watch the log for the\n'
     printf '`rope:` line (should say YaRN factor 2 -- the rotary reaches 524288),\n'
     printf 'the `elastic` line (re-derive RADIANCE_ENGINE_HOST_POOL_MIB from it),\n'
-    printf 'and the `kv:` line (i8 costs more per token than 1.x fp8 did -- it\n'
-    printf 'says what share of max-num-seqs x max-model-len the pool actually backs).\n'
+    printf 'and the `kv:` line (what share of max-num-seqs x max-model-len the\n'
+    printf 'pool actually backs).\n'
     printf 'Config lives in .env: edit it, then `just radiance-config` + restart.\n'
     printf 'Readiness: `just logs vllm-radiance-engine` or `just compose ps`.\n'
 
