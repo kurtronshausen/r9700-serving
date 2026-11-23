@@ -482,7 +482,13 @@ get-radiance-rad which="served":
     dest="$dest_dir/$repo.rad"
     mkdir -p "$dest_dir"
     printf 'Downloading 113.6 GiB to %s (resumes if interrupted)...\n' "$dest"
-    curl -L -C - --retry 10 --retry-delay 5 -o "$dest" \
+    # Sends the `hf auth login` token when present. A single long-lived HF
+    # connection can decay to ~2 MB/s; interrupting and rerunning resumes on a
+    # fresh one.
+    auth=()
+    tok="${HF_TOKEN:-$(cat "${HF_HOME:-$HOME/.cache/huggingface}/token" 2>/dev/null || true)}"
+    [ -n "$tok" ] && auth=(-H "Authorization: Bearer $tok")
+    curl -L -C - --retry 10 --retry-delay 5 "${auth[@]}" -o "$dest" \
       "https://huggingface.co/StillDeadcode/$repo/resolve/main/$repo.rad"
     if [ -n "$sha" ]; then
       printf 'Checking sha256 (the model card publishes one; ~2 min over 113 GiB)...\n'
